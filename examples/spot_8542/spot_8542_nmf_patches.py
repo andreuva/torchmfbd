@@ -42,7 +42,7 @@ if __name__ == '__main__':
     decSI.deconvolve(infer_object=False, 
                      optimizer='adam', 
                      simultaneous_sequences=90,
-                     n_iterations=150)
+                     n_iterations=350)
             
     obj = []
     for i in range(2):
@@ -50,8 +50,8 @@ if __name__ == '__main__':
     
     fig, ax = pl.subplots(nrows=2, ncols=3, figsize=(15, 10))
     for i in range(2):
-        ax[i, 0].imshow(frames[0, i, 0, :, :], cmap='gray')
-        ax[i, 1].imshow(obj[i][0, :, :], cmap='gray')
+        ax[i, 0].imshow(frames[0, i, 0, :, :], cmap='gray', interpolation='nearest')
+        ax[i, 1].imshow(obj[i][0, :, :], cmap='gray', interpolation='nearest')
 
 
     decSI.update_object(cutoffs=[[0.3, 0.35], [0.3, 0.35]])
@@ -62,7 +62,15 @@ if __name__ == '__main__':
         obj.append(patchify.unpatchify(decSI.obj[i], apodization=6, weight_type='cosine', weight_params=30).cpu().numpy())        
         
     for i in range(2):
-        ax[i, 2].imshow(obj[i][0, :, :], cmap='gray')
+        ax[i, 2].imshow(obj[i][0, :, :], cmap='gray', interpolation='nearest')
+        
+    # Force same vmin and vmax for all images
+    vmin = min([ax[i, j].get_images()[0].get_array().min() for i in range(2) for j in range(3)])
+    vmax = max([ax[i, j].get_images()[0].get_array().max() for i in range(2) for j in range(3)])
+    for i in range(2):
+        for j in range(3):
+            ax[i, j].get_images()[0].set_clim(vmin, vmax)
 
     ax[0, 1].set_title('Reconstructed object')
     ax[0, 2].set_title('Reconstructed object (updated cutoffs)')
+    pl.savefig('spot_8542_nmf_patches.png', dpi=300, bbox_inches='tight')

@@ -135,7 +135,8 @@ class DeconvolutionSV(Deconvolution):
             freq = np.fft.fftfreq(self.npix, d=self.config['images']['pix_size']) / cutoff
             
             xx, yy = np.meshgrid(freq, freq)
-            rho = np.sqrt(xx ** 2 + yy ** 2)
+            rho = np.sqrt(xx ** 2 + yy ** 2).astype('float32')
+            rho = torch.tensor(rho).to(self.device)
 
             diffraction_limit = wavelength * 1e-8 / self.config['telescope']['diameter'] * 206265.0
 
@@ -348,7 +349,7 @@ class DeconvolutionSV(Deconvolution):
         self.logger.info(f" ***************************************")
 
         # Combine all frames
-        self.frames_apodized, self.diversity, self.init_frame_diversity, self.sigma = self.combine_frames()
+        self.frames_apodized, self.diversity, self.init_frame_diversity, self.sigma, self.plane = self.combine_frames()
 
         # Define all basis
         self.define_basis()
@@ -358,6 +359,8 @@ class DeconvolutionSV(Deconvolution):
             self.frames_apodized[i] = self.frames_apodized[i].to(self.device)
             self.diversity[i] = self.diversity[i].to(self.device)
             self.sigma[i] = self.sigma[i].to(self.device)
+            if self.remove_gradient_apodization:
+                self.plane[i] = self.plane[i].to(self.device)
             
         self.logger.info(f"Frames")        
         for i in range(self.n_o):
@@ -549,9 +552,14 @@ class DeconvolutionSV(Deconvolution):
                 
                 
                 # Do some printing
-                gpu_usage = f'{self.handle.gpu_utilization()}'            
-                memory_usage = f'{self.handle.memory_used() / 1024**2:4.1f}/{self.handle.memory_total() / 1024**2:4.1f} MB'
-                memory_pct = f'{self.handle.memory_used() / self.handle.memory_total() * 100.0:4.1f}%'
+                if self.handle is not None:
+                    gpu_usage = f'{self.handle.gpu_utilization()}'            
+                    memory_usage = f'{self.handle.memory_used() / 1024**2:4.1f}/{self.handle.memory_total() / 1024**2:4.1f} MB'
+                    memory_pct = f'{self.handle.memory_used() / self.handle.memory_total() * 100.0:4.1f}%'
+                else:
+                    gpu_usage = '0.0'
+                    memory_usage = '0.0/0.0 MB'
+                    memory_pct = '0.0%'
                 
                 current_lr_obj = optimizer.param_groups[0]['lr']
                 current_lr_modes = optimizer.param_groups[1]['lr']

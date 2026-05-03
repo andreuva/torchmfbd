@@ -709,7 +709,7 @@ class Deconvolution(object):
         
         return psf_norm, psf_ft
     
-    def compute_psfs_nmf(self, modes):
+    def compute_psfs_nmf(self, modes, shift_x=None, shift_y=None):
         """
         Compute the Point Spread Functions (PSFs) from the given modes.
         Parameters:
@@ -726,10 +726,13 @@ class Deconvolution(object):
         psf_norm = [None] * self.n_o
         psf_ft = [None] * self.n_o
         
+        # Enforce non-negativity of NMF coefficients 
+        modes_nn = F.softplus(modes)
+
         for i in range(self.n_o):
 
             # Compute PSF from estimated modes                
-            psf = torch.einsum('ijk,klm->ijlm', modes, self.basis[i][0:n_active, :, :])
+            psf = torch.einsum('ijk,klm->ijlm', modes_nn, self.basis[i][0:n_active, :, :])
 
             psf = torch.fft.fftshift(psf, dim=[-2, -1])
                         
@@ -738,6 +741,21 @@ class Deconvolution(object):
 
             # FFT of the PSF
             psf_ft[i] = torch.fft.fft2(psf_norm[i], norm=self.fft_norm)
+
+            # Apply Fourier-domain shift (tip-tilt substitute for NMF)
+            # shift_x, shift_y are in pixels; shape: (n_seq,)
+            sx = shift_x if shift_x is not None else (self.shift_x if hasattr(self, 'shift_x') else None)
+            sy = shift_y if shift_y is not None else (self.shift_y if hasattr(self, 'shift_y') else None)
+            if sx is not None and sy is not None:
+                freq_x = torch.fft.fftfreq(self.npix, device=self.device)  # (W,)
+                freq_y = torch.fft.fftfreq(self.npix, device=self.device)  # (H,)
+                fy, fx = torch.meshgrid(freq_y, freq_x, indexing='ij')     # (H, W)
+                # shift: (n_seq, 1, 1, 1) for broadcasting over (n_seq, n_f, H, W)
+                phase = (-2j * torch.pi * (
+                    sx[:, None, None, None] * fx[None, None, :, :] +
+                    sy[:, None, None, None] * fy[None, None, :, :]
+                ))
+                psf_ft[i] = psf_ft[i] * torch.exp(phase)
         
         return psf_norm, psf_ft
     
@@ -1270,7 +1288,8 @@ class Deconvolution(object):
                 psf, psf_ft = self.compute_psfs(self.modes_seq[i_seq], diversity_seq, jitter=self.jitter_seq[i_seq] if self.use_jitter else None)
             
             if self.psf_model.lower() == 'nmf':
-                psf, psf_ft = self.compute_psfs_nmf(self.modes_seq[i_seq])
+                sx, sy = self.shift_seq[i_seq] if self.shift_seq[i_seq] is not None else (None, None)
+                psf, psf_ft = self.compute_psfs_nmf(self.modes_seq[i_seq], shift_x=sx, shift_y=sy)
             
             if (self.infer_object):
 
@@ -1489,6 +1508,7 @@ class Deconvolution(object):
         self.modes_seq = [None] * n_sequences
         self.pars_s0_seq = [None] * n_sequences
         self.jitter_seq = [None] * n_sequences
+        self.shift_seq = [None] * n_sequences
         self.loss = [None] * n_sequences
 
         self.psf_seq = [None] * n_sequences        
@@ -1576,11 +1596,20 @@ class Deconvolution(object):
                     tmp, _ = optim.nnls(self.basis[0].reshape((self.n_modes, self.npix**2)).T.cpu().numpy(), self.psf_diffraction[0].flatten().cpu().numpy())
                     modes = torch.tensor(tmp[None, None, :].astype('float32')).expand((n_seq, self.n_f, self.n_modes))
                     modes = modes.clone().detach().to(self.device).requires_grad_(True)
+                    # Initialize learnable PSF shift (one per sequence, in pixels)
+                    self.shift_x = torch.zeros(n_seq, device=self.device, requires_grad=True)
+                    self.shift_y = torch.zeros(n_seq, device=self.device, requires_grad=True)
                     
+            if self.psf_model.lower() == 'nmf' and hasattr(self, 'shift_x'):
+                self.logger.info(f"NMF: adding learnable PSF shift (shift_x, shift_y) to optimizer...")
+
             if (infer_object):
                 self.logger.info(f"Optimizing object and modes...")
 
                 parameters = [{'params': modes, 'lr': self.lr_modes}]
+                if self.psf_model.lower() == 'nmf' and hasattr(self, 'shift_x'):
+                    parameters.append({'params': self.shift_x, 'lr': self.lr_modes})
+                    parameters.append({'params': self.shift_y, 'lr': self.lr_modes})
                 obj = [None] * self.n_o
 
                 for i in range(self.n_o):
@@ -1591,6 +1620,9 @@ class Deconvolution(object):
                 self.logger.info(f"Optimizing modes only...")
 
                 parameters = [{'params': modes, 'lr': self.lr_modes}]
+                if self.psf_model.lower() == 'nmf' and hasattr(self, 'shift_x'):
+                    parameters.append({'params': self.shift_x, 'lr': self.lr_modes})
+                    parameters.append({'params': self.shift_y, 'lr': self.lr_modes})
 
                 if self.loss_type == 'marginal':
                     # S0(v) = k / (1 + (v/v0)^2)**(p/2)
@@ -1846,6 +1878,8 @@ class Deconvolution(object):
             # Store the results for the current set of sequences
             self.modes_seq[i_seq] = modes.detach()
             self.jitter_seq[i_seq] = jitter_torch.detach() if self.use_jitter else None
+            if self.psf_model.lower() == 'nmf' and hasattr(self, 'shift_x'):
+                self.shift_seq[i_seq] = (self.shift_x.detach(), self.shift_y.detach())
             self.pars_s0_seq[i_seq] = self.pars_s0_out if not infer_object and self.loss_type == 'marginal' else None
             self.loss[i_seq] = losses.detach()
 

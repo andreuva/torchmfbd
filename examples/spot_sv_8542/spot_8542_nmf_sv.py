@@ -49,4 +49,4 @@ if __name__ == '__main__':
     for i in range(2):
         ax[0, i].imshow(frames[0, i, 0, :, :])
         ax[1, i].imshow(obj[i][0, :, :])
-    pl.savefig('nmf.png')    
+    pl.savefig('nmf_sv.png', dpi=300, bbox_inches='tight')
