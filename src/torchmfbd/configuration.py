@@ -28,7 +28,7 @@ def _check_config(config):
         config["optimization"]["gpu"] = -1
 
     if "transform" not in config["optimization"]:
-        config["optimization"]["gpu"] = "none"
+        config["optimization"]["transform"] = "none"
 
     if "softplus_scale" not in config["optimization"]:
         config["optimization"]["softplus_scale"] = 1.0
@@ -66,8 +66,8 @@ def _check_config(config):
 
     if "priors" not in config:
         config["priors"] = {}
-        config["priors"]["K"] = {'mean': 1.0, 'std': 1.0}
-        config["priors"]["v0"] = {'mean': 0.1, 'std': 1.0}
-        config["priors"]["p"] = {'mean': 2.0, 'std': 1.0}
+        config["priors"]["K"] = {'mean': 1.0, 'sigma': 1.0}
+        config["priors"]["v0"] = {'mean': 0.1, 'sigma': 1.0}
+        config["priors"]["p"] = {'mean': 2.0, 'sigma': 1.0}
                                     
     return config

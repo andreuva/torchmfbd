@@ -54,6 +54,7 @@ class DeconvolutionSV(Deconvolution):
             if (self.psf_model.lower() == 'pca'):
                 self.logger.info(f"Computing PCA coefficients of diffraction PSF")
                 self.coeffs_diffraction = np.sum(self.psf_modes * self.psf_diffraction[None, ...], axis=(1, 2))
+                self.modes_init = np.copy(self.coeffs_diffraction)
 
             if (self.psf_model.lower() == 'nmf'):
                 # Normalize the modes to unit area            
@@ -191,15 +192,17 @@ class DeconvolutionSV(Deconvolution):
         
         return int(y)
     
-    def compute_syn(self, im, obj_filtered, tiptilt_infer, modes_infer, infer_tiptilt, infer_modes, i_o):
+    def compute_syn(self, im, obj_filtered, tiptilt, modes, infer_tiptilt, infer_modes, i_o):
         """
         Compute the synthetic image based on the inferred object, tip-tilt, and modes.
+        Receives tiptilt and modes already interpolated to full (npix x npix) resolution.
 
         Parameters:
         im (torch.Tensor): Input image tensor of shape (ns, no, nf, nx, ny).
-        obj_infer (torch.Tensor): Inferred object tensor.
-        tiptilt_infer (torch.Tensor): Inferred tip-tilt tensor.
-        modes_infer (torch.Tensor): Inferred modes tensor.
+        obj_filtered (torch.Tensor): Filtered object tensor.
+        tiptilt (torch.Tensor): Tip-tilt tensor, already at npix resolution.
+        modes (torch.Tensor): Modes tensor, already at npix resolution.
+        infer_tiptilt (bool): Whether tip-tilt is being inferred.
         infer_modes (bool): Flag indicating whether to infer modes or simply apply tip-tilt.
 
         Returns:
@@ -207,24 +210,6 @@ class DeconvolutionSV(Deconvolution):
         """
 
         ns, nf, nx, ny = im.shape
-
-        # Interpolate the tiptilt and modes to the appropriate sizes in case they
-        # are defined in a coarser grid
-        if (self.ngrid_modes != self.npix):                
-            tmp = rearrange(tiptilt_infer, 'b nf d nx ny -> (b nf) d nx ny')
-            tiptilt = F.interpolate(tmp, size=(self.npix, self.npix), mode='bilinear')
-            tiptilt = rearrange(tiptilt, '(b nf) d nx ny -> b nf d nx ny', b=ns)
-
-            del tmp
-            
-            tmp = rearrange(modes_infer, 'b nf nm nx ny -> (b nf) nm nx ny')
-            modes = F.interpolate(tmp, size=(self.npix, self.npix), mode='bilinear')
-            modes = rearrange(modes, '(b nf) nm nx ny -> b nf nm nx ny', b=ns)
-
-            del tmp        
-        else:
-            tiptilt = tiptilt_infer
-            modes = modes_infer
                 
         # Apply tip-tilt to the object by applying a warp with the pixel-dependent optical flow
         if infer_tiptilt:
@@ -236,7 +221,7 @@ class DeconvolutionSV(Deconvolution):
 
             del tmp_obj, tmp_tt
         else:
-            obj_tt = obj_filtered[:, :, None, :, :].expand(1, no, nf, self.npix, self.npix)
+            obj_tt = obj_filtered[:, None, None, :, :].expand(ns, 1, nf, self.npix, self.npix)
             
         # Now apply the effect of the high order modes
         if infer_modes:
@@ -244,12 +229,13 @@ class DeconvolutionSV(Deconvolution):
             # If we are using NMF, we need to force the coefficients to be non-negative
             # and also normalize by their sum to force the PSF to have unit area
             if self.psf_model.lower() == 'nmf':                
-                # modes = F.relu(modes, inplace=False)
-                modes = F.softplus(self.config['optimization']['softplus_scale'] * modes) / self.config['optimization']['softplus_scale']
+                modes_nn = F.softplus(self.config['optimization']['softplus_scale'] * modes) / self.config['optimization']['softplus_scale']
                                 
-                modes_unitarea = modes / torch.sum(modes, dim=2, keepdims=True)
+                modes_unitarea = modes_nn / torch.sum(modes_nn, dim=2, keepdims=True)
                 
-                del modes
+                del modes_nn
+            else:
+                modes_unitarea = modes
             
             # Compute the product of the object and the modes
             obj_tt = obj_tt[:, :, :, None, :, :] * modes_unitarea[:, None, :, :, :, :]
@@ -351,6 +337,11 @@ class DeconvolutionSV(Deconvolution):
         # Combine all frames
         self.frames_apodized, self.diversity, self.init_frame_diversity, self.sigma, self.plane = self.combine_frames()
 
+        # Precompute the FFT of the frames to speed up potential object updates
+        self.frames_ft = [None] * self.n_o
+        for i in range(self.n_o):
+            self.frames_ft[i] = torch.fft.fft2(self.frames_apodized[i], norm=self.fft_norm)
+
         # Define all basis
         self.define_basis()
 
@@ -359,6 +350,7 @@ class DeconvolutionSV(Deconvolution):
             self.frames_apodized[i] = self.frames_apodized[i].to(self.device)
             self.diversity[i] = self.diversity[i].to(self.device)
             self.sigma[i] = self.sigma[i].to(self.device)
+            self.frames_ft[i] = self.frames_ft[i].to(self.device)
             if self.remove_gradient_apodization:
                 self.plane[i] = self.plane[i].to(self.device)
             
@@ -430,7 +422,7 @@ class DeconvolutionSV(Deconvolution):
             weight_seq = []
             for i in range(self.n_o):
                 frames_apodized_seq.append(self.frames_apodized[i][seq, ...])
-                frames_ft.append(torch.fft.fft2(self.frames_apodized[i][seq, ...]))
+                frames_ft.append(self.frames_ft[i][seq, ...])
                 sigma_seq.append(self.sigma[i][seq, ...])
                 weight_seq.append(1.0 / self.sigma[i][seq, ...])
                         
@@ -501,6 +493,22 @@ class DeconvolutionSV(Deconvolution):
                 loss_modes = torch.tensor(0.0).to(self.device)
                 loss_obj = torch.tensor(0.0).to(self.device)
 
+                # Interpolate tiptilt and modes once per optimizer step (PERF-SV-A)
+                # tiptilt_infer/modes_infer don't change across frame batches within a step.
+                if self.ngrid_modes != self.npix:
+                    tmp = rearrange(tiptilt_infer, 'b nf d nx ny -> (b nf) d nx ny')
+                    tiptilt_hr = F.interpolate(tmp, size=(self.npix, self.npix), mode='bilinear')
+                    tiptilt_hr = rearrange(tiptilt_hr, '(b nf) d nx ny -> b nf d nx ny', b=n_seq)
+                    del tmp
+
+                    tmp = rearrange(modes_infer, 'b nf nm nx ny -> (b nf) nm nx ny')
+                    modes_hr = F.interpolate(tmp, size=(self.npix, self.npix), mode='bilinear')
+                    modes_hr = rearrange(modes_hr, '(b nf) nm nx ny -> b nf nm nx ny', b=n_seq)
+                    del tmp
+                else:
+                    tiptilt_hr = tiptilt_infer
+                    modes_hr = modes_infer
+
                 obj_filtered = [None] * self.n_o
 
                 for i in range(self.n_o):
@@ -516,8 +524,8 @@ class DeconvolutionSV(Deconvolution):
                         # Compute the synthetic images taking into account the tip-tilt and modes
                         syn, tiptilt, modes = self.compute_syn(frames_apodized_seq[i][:, ind, :, :], 
                                                                              obj_filtered[i], 
-                                                                             tiptilt_infer[:, ind, ...],
-                                                                             modes_infer[:, ind, ...],
+                                                                             tiptilt_hr[:, ind, ...],
+                                                                             modes_hr[:, ind, ...],
                                                                              infer_tiptilt, 
                                                                              infer_modes,
                                                                              i)
@@ -604,7 +612,13 @@ class DeconvolutionSV(Deconvolution):
                 tiptilt = tiptilt_infer
                 modes = modes_infer
 
-            # Denormalize the object and the frames and move to the CPU                    
+            # Add back the gradient plane that was subtracted during apodization (BUG-49)
+            # Mirrors base class compute_object: out_filter[i] += plane[i][:, 0, :, :]
+            if self.remove_gradient_apodization:
+                for i in range(self.n_o):
+                    obj_filtered[i] = obj_filtered[i] + self.plane[i][seq, 0, :, :]
+
+            # Denormalize the object and the frames and move to the CPU
             self.obj_seq[i_seq] = [obj_filtered[i].detach() for i in range(self.n_o)]                                    
             self.tiptilt_lr_seq[i_seq] = tiptilt_infer.detach()
             self.tiptilt_hr_seq[i_seq] = tiptilt.detach()

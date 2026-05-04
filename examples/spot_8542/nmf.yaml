@@ -6,6 +6,7 @@ images:
     n_pixel : 64    
     pix_size : 0.059
     apodization_border : 6
+    remove_gradient_apodization : True
 
 object1:
     wavelength : 8542.0

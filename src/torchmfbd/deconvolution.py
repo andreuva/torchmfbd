@@ -7,7 +7,11 @@ from collections import OrderedDict
 from tqdm import tqdm
 from skimage.morphology import flood
 import scipy.ndimage as nd
-from nvitop import Device
+try:
+    from nvitop import Device
+    HAS_NVITOP = True
+except ImportError:
+    HAS_NVITOP = False
 import logging
 import torchmfbd.kl_modes as kl_modes
 import torchmfbd.noise as noise
@@ -68,8 +72,11 @@ class Deconvolution(object):
         self.cuda = torch.cuda.is_available()      
 
         # Check that the GPU compatible
-        if len(Device.all()) == 0:
-            self.cuda = False  
+        if HAS_NVITOP:
+            if len(Device.all()) == 0:
+                self.cuda = False  
+        else:
+            self.cuda = False
 
         # Ger handlers to later check memory and usage of GPUs
         if self.cuda:
@@ -84,7 +91,10 @@ class Deconvolution(object):
                 self.logger.info(f"Computing in {self.handle.name()} (free {self.handle.memory_free() / 1024**3:4.2f} GB) - cuda:{self.config['optimization']['gpu']}")
                 self.initial_memory_used = self.handle.memory_used()
         else:
-            self.logger.info(f"No GPU is available. Computing in cpu")
+            if not HAS_NVITOP:
+                self.logger.info(f"nvitop not installed. Computing in cpu")
+            else:
+                self.logger.info(f"No GPU is available. Computing in cpu")
             self.device = torch.device("cpu")
             self.handle = None
 
@@ -778,7 +788,7 @@ class Deconvolution(object):
             psf = (torch.conj(ft) * ft).real
             
             # Normalize PSF        
-            psf_norm[i] = psf / torch.sum(psf)
+            psf_norm[i] = psf / torch.sum(psf, dim=(-1, -2), keepdim=True)
 
             # FFT of the PSF
             psf_ft[i] = torch.fft.fft2(psf_norm[i], norm=self.fft_norm)
@@ -1039,7 +1049,7 @@ class Deconvolution(object):
                     Sconj_S = torch.sum(torch.conj(psf_ft[i]) * psf_ft[i], dim=1)
                     Sconj_I = torch.sum(torch.conj(psf_ft[i]) * frames_ft[i], dim=1)
 
-                    mask = self.lofdahl_scharmer_filter(Sconj_S, Sconj_I, sigma[i]) * self.mask_diffraction_th[i][None, :, :]
+                    mask = self.lofdahl_scharmer_filter(Sconj_S, Sconj_I, sigma[i]**2) * self.mask_diffraction_th[i][None, :, :]
                                 
                     loss = t1 - mask * t2 * torch.conj(t2) / (Q + 1e-10)
                 
@@ -1278,7 +1288,7 @@ class Deconvolution(object):
             for i in range(self.n_o):
                 frames_apodized_seq.append(self.frames_apodized[i][seq, ...].to(self.device))
                 plane_seq.append(self.plane[i][seq, ...].to(self.device))
-                frames_ft.append(torch.fft.fft2(self.frames_apodized[i][seq, ...], norm=self.fft_norm).to(self.device))
+                frames_ft.append(self.frames_ft[i][seq, ...].to(self.device))
                 sigma_seq.append(self.sigma[i][seq, ...].to(self.device))
                 diversity_seq.append(self.diversity[i][seq, ...].to(self.device))
                 
@@ -1434,6 +1444,11 @@ class Deconvolution(object):
         # Combine all frames        
         self.frames_apodized, self.diversity, self.init_frame_diversity, self.sigma, self.plane = self.combine_frames()
 
+        # Precompute the FFT of the frames to speed up the optimization
+        self.frames_ft = [None] * self.n_o
+        for i in range(self.n_o):
+            self.frames_ft[i] = torch.fft.fft2(self.frames_apodized[i], norm=self.fft_norm)
+
         # Define all basis
         self.define_basis()
         
@@ -1546,7 +1561,7 @@ class Deconvolution(object):
             for i in range(self.n_o):
                 frames_apodized_seq.append(self.frames_apodized[i][seq, ...].to(self.device))
                 plane_seq.append(self.plane[i][seq, ...].to(self.device))
-                frames_ft.append(torch.fft.fft2(self.frames_apodized[i][seq, ...], norm=self.fft_norm).to(self.device))
+                frames_ft.append(self.frames_ft[i][seq, ...].to(self.device))
                 sigma_seq.append(self.sigma[i][seq, ...].to(self.device))
                 diversity_seq.append(self.diversity[i][seq, ...].to(self.device))
 
@@ -1593,7 +1608,9 @@ class Deconvolution(object):
                         modes = modes.clone().detach().to(self.device).requires_grad_(True)
                 
                 if self.psf_model.lower() == 'nmf':                               
-                    tmp, _ = optim.nnls(self.basis[0].reshape((self.n_modes, self.npix**2)).T.cpu().numpy(), self.psf_diffraction[0].flatten().cpu().numpy())
+                    # Centering the diffraction PSF to match the NMF basis spatial layout
+                    psf_diff_centered = torch.fft.fftshift(self.psf_diffraction[0], dim=[-2, -1])
+                    tmp, _ = optim.nnls(self.basis[0].reshape((self.n_modes, self.npix**2)).T.cpu().numpy(), psf_diff_centered.flatten().cpu().numpy())
                     modes = torch.tensor(tmp[None, None, :].astype('float32')).expand((n_seq, self.n_f, self.n_modes))
                     modes = modes.clone().detach().to(self.device).requires_grad_(True)
                     # Initialize learnable PSF shift (one per sequence, in pixels)
@@ -1876,7 +1893,10 @@ class Deconvolution(object):
                 degraded[i] = torch.fft.ifft2(degraded_ft).real
             
             # Store the results for the current set of sequences
-            self.modes_seq[i_seq] = modes.detach()
+            if self.psf_model.lower() == 'nmf':
+                self.modes_seq[i_seq] = F.softplus(modes).detach()
+            else:
+                self.modes_seq[i_seq] = modes.detach()
             self.jitter_seq[i_seq] = jitter_torch.detach() if self.use_jitter else None
             if self.psf_model.lower() == 'nmf' and hasattr(self, 'shift_x'):
                 self.shift_seq[i_seq] = (self.shift_x.detach(), self.shift_y.detach())
