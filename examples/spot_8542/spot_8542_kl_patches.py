@@ -36,7 +36,7 @@ if __name__ == '__main__':
     
     # Patchify and add the frames
     for i in range(2):        
-        frames_patches = patchify.patchify(frames[:, i, :, :, :], patch_size=64, stride_size=50, flatten_sequences=True)
+        frames_patches = patchify.patchify(frames[:, i, :, :, :], patch_size=64, stride_size=32, flatten_sequences=True)
         decSI.add_frames(frames_patches, id_object=i, id_diversity=0, diversity=0.0)
                 
     decSI.deconvolve(infer_object=False, 
@@ -66,13 +66,12 @@ if __name__ == '__main__':
     for i in range(2):
         ax[i, 2].imshow(obj[i][0, 0:nx, 0:ny], cmap='gray', interpolation='nearest')
 
-    # Force same vmin and vmax for all images
-    vmin = min([ax[i, j].get_images()[0].get_array().min() for i in range(2) for j in range(3)])
-    vmax = max([ax[i, j].get_images()[0].get_array().max() for i in range(2) for j in range(3)])
+    # Force same vmin and vmax for all images using the original images as reference:
+    vmin = np.min(frames[:, :, 0, :, :].cpu().numpy())
+    vmax = np.max(frames[:, :, 0, :, :].cpu().numpy())
     for i in range(2):
         for j in range(3):
             ax[i, j].get_images()[0].set_clim(vmin, vmax)
-
 
     ax[0, 1].set_title('Reconstructed object')
     ax[0, 2].set_title('Reconstructed object (updated cutoffs)')

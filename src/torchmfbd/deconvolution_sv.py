@@ -94,7 +94,7 @@ class DeconvolutionSV(Deconvolution):
                                                             
         # Move all relevant quantities to GPU
         self.psf_modes = torch.tensor(self.psf_modes.astype('float32')).to(self.device)
-        self.psf_modes_fft = torch.fft.fft2(self.psf_modes)                            
+        self.psf_modes_fft = torch.fft.rfft2(self.psf_modes)                            
         self.modes_init = torch.tensor(self.modes_init.astype('float32'))
 
         # Learning rates
@@ -192,7 +192,7 @@ class DeconvolutionSV(Deconvolution):
         
         return int(y)
     
-    def compute_syn(self, im, obj_filtered, tiptilt, modes, infer_tiptilt, infer_modes, i_o):
+    def compute_syn(self, ns, nf, obj_filtered, tiptilt, modes, infer_tiptilt, infer_modes, i_o):
         """
         Compute the synthetic image based on the inferred object, tip-tilt, and modes.
         Receives tiptilt and modes already interpolated to full (npix x npix) resolution.
@@ -209,7 +209,7 @@ class DeconvolutionSV(Deconvolution):
         torch.Tensor: Synthetic image tensor.
         """
 
-        ns, nf, nx, ny = im.shape
+        nx, ny = self.npix, self.npix
                 
         # Apply tip-tilt to the object by applying a warp with the pixel-dependent optical flow
         if infer_tiptilt:
@@ -237,44 +237,40 @@ class DeconvolutionSV(Deconvolution):
             else:
                 modes_unitarea = modes
             
-            # Compute the product of the object and the modes
-            obj_tt = obj_tt[:, :, :, None, :, :] * modes_unitarea[:, None, :, :, :, :]
-            
-            # Apply the apodization window                            
+            # Optimization: Apply apodization window to the object ONCE before mode expansion
+            # This is equivalent to applying it per-mode but much faster
             mn = torch.mean(obj_tt, dim=(-1, -2), keepdims=True)
-            obj_tt -= mn
-            obj_tt *= self.window[None, None, None, None, :, :]
-            obj_tt += mn
-
-            # Compute convolution of current object with the PCA modes                               
-            obj_tt_modes_fft = torch.fft.fft2(obj_tt)
-            obj_convolved_with_psf_modes = torch.fft.ifft2(obj_tt_modes_fft * self.psf_modes_fft[None, None, None, ...]).real
+            obj_tt_apod = (obj_tt - mn) * self.window[None, None, None, :, :] + mn
             
-            # Now sum convolved objects weighted by the modes
-            syn = torch.sum(obj_convolved_with_psf_modes, dim=3)
-
-            del obj_convolved_with_psf_modes, obj_tt_modes_fft
+            # Compute the product of the apodized object and the modes
+            # shape: (ns, nf, 1, n_modes, nx, ny) * (ns, 1, nf, n_modes, nx, ny) -> 6D
+            obj_tt_expanded = obj_tt_apod[:, :, :, None, :, :] * modes_unitarea[:, None, :, :, :, :]
             
-            # In the case of the PCA basis, we need to normalize the modes by
-            # using the convolution of the modes with the PCA basis
+            # Compute convolution of current object with the PSF modes using rfft2
+            obj_tt_modes_fft = torch.fft.rfft2(obj_tt_expanded)
+            
+            # Optimization: Sum in Fourier domain using einsum to avoid 6D memory allocation
+            # By linearity: sum_m IFFT(X_m * H_m) == IFFT(sum_m X_m * H_m)
+            # syn_ft shape: (ns, no, nf, freq_x, freq_y_half)
+            syn_ft = torch.einsum('b...mxy, mxy -> b...xy', obj_tt_modes_fft, self.psf_modes_fft)
+            syn = torch.fft.irfft2(syn_ft, s=(self.npix, self.npix))
 
+            del obj_tt_modes_fft, obj_tt_expanded, syn_ft
+
+            # In the case of the PCA basis, we need to normalize by the
+            # convolution of the modes with the PCA basis
             if self.psf_model.lower() == 'pca':
-                # Normalization                
-                # Apply the apodization window                            
                 mn = torch.mean(modes, dim=(-1, -2), keepdims=True)
-                modes_norm = modes - mn
-                modes_norm *= self.window[None, None, None, :, :]
-                modes_norm += mn
+                modes_norm = (modes - mn) * self.window[None, None, None, :, :] + mn
                 
-                # Compute convolution of current object with the PCA modes                               
-                modes_norm_fft = torch.fft.fft2(modes_norm)
-                norm = torch.fft.ifft2(modes_norm_fft * self.psf_modes_fft[None, None, None, ...]).real
-                norm = torch.sum(norm, dim=3)
-                        
+                # Compute convolution using rfft2, summing in Fourier domain using einsum
+                modes_norm_fft = torch.fft.rfft2(modes_norm)
+                norm_ft = torch.einsum('b...mxy, mxy -> b...xy', modes_norm_fft, self.psf_modes_fft)
+                norm = torch.fft.irfft2(norm_ft, s=(self.npix, self.npix))
+                
                 syn = syn / norm
 
-                del norm
-                del modes_norm_fft, modes_norm            
+                del norm, norm_ft, modes_norm_fft, modes_norm
 
         else:
             syn = obj_tt
@@ -432,6 +428,8 @@ class DeconvolutionSV(Deconvolution):
                 obj = []
                 for i in range(self.n_o):
                     obj.append(torch.mean(frames_apodized_seq[i], dim=1))
+                    if not self.remove_gradient_apodization:
+                        obj[i] /= torch.mean(obj[i])
                 
             # Select the frame with the highest contrast
             if self.config['initialization']['object'].lower() == 'contrast':
@@ -439,8 +437,14 @@ class DeconvolutionSV(Deconvolution):
 
                 obj = []
                 for i in range(self.n_o):
-                    contrast = torch.std(frames_apodized_seq[i], dim=(-1, -2)) / torch.mean(frames_apodized_seq[i], dim=(-1, -2))
+                    if self.remove_gradient_apodization:
+                        contrast = torch.std(frames_apodized_seq[i], dim=(-1, -2))
+                    else:
+                        contrast = torch.std(frames_apodized_seq[i], dim=(-1, -2)) / torch.mean(frames_apodized_seq[i], dim=(-1, -2))
+                    
                     obj.append(frames_apodized_seq[i][:, torch.argmax(contrast), ...])
+                    if not self.remove_gradient_apodization:
+                        obj[i] /= torch.mean(obj[i])
                                             
             
             if infer_tiptilt and infer_modes:
@@ -510,19 +514,18 @@ class DeconvolutionSV(Deconvolution):
                     modes_hr = modes_infer
 
                 obj_filtered = [None] * self.n_o
-
                 for i in range(self.n_o):
-
                     # Filter the object in the Fourier domain
                     if self.image_filter[i] == 'tophat':                        
                         obj_filtered[i] = self.fft_filter_image(obj_infer[i], self.mask_diffraction_th[i])
                     else:
-                        obj_filtered[i] = obj_infer
+                        obj_filtered[i] = obj_infer[i]
                     
+                for i in range(self.n_o):
                     for j, ind in enumerate(indices):
                                                 
-                        # Compute the synthetic images taking into account the tip-tilt and modes
-                        syn, tiptilt, modes = self.compute_syn(frames_apodized_seq[i][:, ind, :, :], 
+                        # Compute the synthetic images
+                        syn, tiptilt, modes = self.compute_syn(n_seq, len(ind),
                                                                              obj_filtered[i], 
                                                                              tiptilt_hr[:, ind, ...],
                                                                              modes_hr[:, ind, ...],

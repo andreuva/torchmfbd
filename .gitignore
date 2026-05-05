@@ -12,6 +12,7 @@ __pycache__/
 *.h5
 *.fits
 *.png
+*.gif
 
 # Distribution / packaging
 .Python

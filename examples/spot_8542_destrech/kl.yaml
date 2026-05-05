@@ -5,18 +5,20 @@ telescope:
 images:
     n_pixel : 64    
     pix_size : 0.059
-    apodization_border : 6
+    apodization_border : 10
     remove_gradient_apodization : True
 
 object1:
     wavelength : 8542.0
     image_filter: scharmer
     cutoff : [0.95, 0.99]
+    s_u_joint: 250.0
 
 object2:
     wavelength : 8542.0
     image_filter: scharmer
     cutoff : [0.95, 0.99]
+    s_u_joint: 250.0
     
 optimization:
     gpu : 0
@@ -24,21 +26,19 @@ optimization:
     softplus_scale : 1.0    
     lr_obj : 0.02
     lr_modes : 0.08
-    show_object_info: False
     lr_prior : 0.1
     loss_type: marginal
 
 regularization:
      iuwt1:
         variable : object
-        lambda : 0.0
+        lambda : 0.00
         nbands : 5
 
 psf:
-    model : nmf    
-    nmax_modes : 150
-    filename: '../basis/nmf_8542_n_150_r0_5_30.npz'
-    ngrid_modes: 8
+    model : kl
+    nmax_modes : 54
+    jitter : False
 
 initialization:
     object : contrast
@@ -46,8 +46,8 @@ initialization:
 
 annealing:
     type: linear
-    start_pct : 0.0
-    end_pct : 0.85
+    start_pct : 0.1
+    end_pct : 0.6
 
 priors:
     K:

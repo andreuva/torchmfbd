@@ -39,6 +39,7 @@ psf:
     nmax_modes : 150
     filename: '../basis/nmf_8542_n_150_r0_5_30.npz'
     ngrid_modes: 8
+    shift: false
 
 initialization:
     object : contrast

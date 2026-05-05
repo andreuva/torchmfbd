@@ -45,6 +45,9 @@ def _check_config(config):
     if "jitter" not in config["psf"]:
         config["psf"]["jitter"] = False
         
+    if "shift" not in config["psf"]:
+        config["psf"]["shift"] = False
+
     if config["optimization"]["transform"] not in ["softplus", "none"]:
         raise ValueError(f"Invalid value for transform. It is {config['optimization']['transform']} but should be softplus or none")
     

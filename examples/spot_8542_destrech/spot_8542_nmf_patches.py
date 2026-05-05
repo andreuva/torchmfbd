@@ -1,9 +1,13 @@
+import sys
+from unittest.mock import MagicMock
+sys.modules['nvitop'] = MagicMock()
+sys.modules['dict_hash'] = MagicMock()
 import numpy as np
 import os
 import h5py
 import torch
 import matplotlib.pyplot as pl
-import sys
+sys.path.append('../../src')
 sys.path.append('../')
 from readsst import readsst
 import torchmfbd
@@ -15,12 +19,11 @@ if __name__ == '__main__':
     lam = 7
     npixx = 256
     npixy = 512
-    obs_file = f"spot_20200727_083509_8542_npix512_original.h5"
+    obs_file = "spot_20200727_083509_8542_npix512_destretched.h5"
 
     print(f'Reading observations from {obs_file}...')
-    f = h5py.File(obs_file, 'r')
-    im = f['im'][:]    
-    f.close()
+    with h5py.File(obs_file, 'r') as f:
+        im = f['im'][:]    
     
     frames = im[:, :, :, 0:npixx, 0:npixy]
 
