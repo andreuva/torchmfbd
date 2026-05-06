@@ -51,7 +51,7 @@ annealing:
 
 priors:
     K:
-        mean: 1.0
+        mean: 1000
         sigma: 1.0
     v0:
         mean: 0.1

@@ -7,6 +7,7 @@ import sys
 sys.path.append('../')
 from readsst import readsst
 import torchmfbd
+import psf_tools
 
 
 if __name__ == '__main__':
@@ -40,9 +41,9 @@ if __name__ == '__main__':
         decSI.add_frames(frames_patches, id_object=i, id_diversity=0, diversity=0.0)
                 
     decSI.deconvolve(infer_object=False, 
-                     optimizer='adam', 
+                     optimizer='lbfgs', 
                      simultaneous_sequences=90,
-                     n_iterations=350)
+                     n_iterations=10)
             
     obj = []
     for i in range(2):
@@ -74,3 +75,7 @@ if __name__ == '__main__':
     ax[0, 1].set_title('Reconstructed object')
     ax[0, 2].set_title('Reconstructed object (updated cutoffs)')
     pl.savefig('spot_8542_nmf_patches.png', dpi=300, bbox_inches='tight')
+
+    # Export and plot PSFs for comparison
+    psfs = psf_tools.export_psfs(decSI)
+    psf_tools.plot_psfs(psfs, model_name='NMF')

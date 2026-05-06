@@ -17,16 +17,16 @@ object2:
     wavelength : 8542.0
     image_filter: scharmer
     cutoff : [0.95, 0.99]
-    
+
 optimization:
     gpu : 0
     transform : softplus
-    softplus_scale : 1.0    
-    lr_obj : 0.02
+    softplus_scale : 1000
+    lr_obj : 0.00
     lr_modes : 0.08
     show_object_info: False
-    lr_prior : 0.1
-    loss_type: marginal
+    lr_prior : 0.00
+    loss_type: joint
 
 regularization:
      iuwt1:
@@ -39,6 +39,9 @@ psf:
     nmax_modes : 150
     filename: '../basis/nmf_8542_n_150_r0_5_30.npz'
     ngrid_modes: 8
+    shift: True
+    jitter: True
+
 
 initialization:
     object : contrast
@@ -51,7 +54,7 @@ annealing:
 
 priors:
     K:
-        mean: 1.0
+        mean: 1000
         sigma: 1.0
     v0:
         mean: 0.1

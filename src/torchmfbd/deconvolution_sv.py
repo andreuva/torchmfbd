@@ -47,10 +47,17 @@ class DeconvolutionSV(Deconvolution):
             self.logger.info(f"  * Number of modes {self.n_modes}...")            
             
             self.psf_modes = f['basis'][0:self.n_modes, :].reshape((self.n_modes, n_psf, n_psf))
-
-            # Pad diffraction PSF to the size of the image and shift
             self.psf_diffraction = f['psf_diffraction']        
-            
+
+            # Unified resize strategy: Pad or crop PSF modes to the size of the image BEFORE normalization
+            if n_psf > self.npix:
+                self.psf_modes = self.psf_modes[:, n_psf//2 - self.npix//2 : n_psf//2 + self.npix//2, n_psf//2 - self.npix//2 : n_psf//2 + self.npix//2]
+                self.psf_diffraction = self.psf_diffraction[n_psf//2 - self.npix//2 : n_psf//2 + self.npix//2, n_psf//2 - self.npix//2 : n_psf//2 + self.npix//2]
+            elif n_psf < self.npix:
+                pad = (self.npix - n_psf) // 2
+                self.psf_modes = np.pad(self.psf_modes, ((0, 0), (pad, pad), (pad, pad)), mode='constant')
+                self.psf_diffraction = np.pad(self.psf_diffraction, ((pad, pad), (pad, pad)), mode='constant')
+
             if (self.psf_model.lower() == 'pca'):
                 self.logger.info(f"Computing PCA coefficients of diffraction PSF")
                 self.coeffs_diffraction = np.sum(self.psf_modes * self.psf_diffraction[None, ...], axis=(1, 2))
@@ -62,7 +69,7 @@ class DeconvolutionSV(Deconvolution):
 
                 self.logger.info(f"Computing NMF coefficients of diffraction PSF")            
                                         
-                self.coeffs_diffraction, _ = opt.nnls(self.psf_modes.reshape((self.n_modes, n_psf**2)).T, self.psf_diffraction.flatten())
+                self.coeffs_diffraction, _ = opt.nnls(self.psf_modes.reshape((self.n_modes, self.npix**2)).T, self.psf_diffraction.flatten())
                 
                 # Since the diffraction PSF is already normalized to unit area, the sum of the inferred coefficients must be 1
                 # We renormalize the coefficients to ensure that
@@ -81,15 +88,8 @@ class DeconvolutionSV(Deconvolution):
         else:
             self.logger.info(f"  * Using tiptilt and modes of size {self.ngrid_modes}x{self.ngrid_modes}")        
 
-        # We use self.psf_modes to refer to both the PCA modes or the NMF modes
-        # Pad the PSF modes to the size of the image
-        pad = (self.npix - n_psf) // 2
-        self.psf_modes = np.pad(self.psf_modes, ((0, 0), (pad, pad), (pad, pad)), mode='constant')
-                
-        # Shift the PCA to later compute FFTs
+        # Shift the modes and diffraction PSF to later compute FFTs
         self.psf_modes = np.fft.ifftshift(self.psf_modes, axes=(1, 2))
-
-        self.psf_diffraction = np.pad(self.psf_diffraction, ((pad, pad), (pad, pad)), mode='constant') 
         self.psf_diffraction = np.fft.ifftshift(self.psf_diffraction) 
                                                             
         # Move all relevant quantities to GPU
@@ -229,9 +229,10 @@ class DeconvolutionSV(Deconvolution):
             # If we are using NMF, we need to force the coefficients to be non-negative
             # and also normalize by their sum to force the PSF to have unit area
             if self.psf_model.lower() == 'nmf':                
-                modes_nn = F.softplus(self.config['optimization']['softplus_scale'] * modes) / self.config['optimization']['softplus_scale']
+                scale = self.config['optimization'].get('softplus_scale', 1.0)
+                modes_nn = F.softplus(scale * modes) / scale
                                 
-                modes_unitarea = modes_nn / torch.sum(modes_nn, dim=2, keepdims=True)
+                modes_unitarea = modes_nn / (torch.sum(modes_nn, dim=2, keepdims=True) + 1e-12)
                 
                 del modes_nn
             else:
@@ -367,8 +368,9 @@ class DeconvolutionSV(Deconvolution):
         # Compute the diffraction masks
         self.compute_diffraction_masks()
         
-        # Annealing schedules        
-        modes = np.arange(self.n_modes)
+        # Annealing schedules — values are mode counts (same convention as SI NMF path)
+        n_anneal = max(2, (self.n_modes - 2) // 5)
+        modes = np.linspace(2, self.n_modes, n_anneal).astype(int)
         self.anneal = self.compute_annealing(modes, n_iterations)
 
         # If the regularization parameter is a scalar, we assume that it is the same for all objects
@@ -420,7 +422,8 @@ class DeconvolutionSV(Deconvolution):
                 frames_apodized_seq.append(self.frames_apodized[i][seq, ...])
                 frames_ft.append(self.frames_ft[i][seq, ...])
                 sigma_seq.append(self.sigma[i][seq, ...])
-                weight_seq.append(1.0 / self.sigma[i][seq, ...])
+                s2_mean = torch.mean(self.sigma[i][seq, ...]**2, dim=1, keepdim=True)
+                weight_seq.append(s2_mean / (self.sigma[i][seq, ...]**2 + 1e-10))
                         
             # Initial estimation of the object: average of all frames
             if self.config['initialization']['object'].lower() == 'average':
@@ -459,8 +462,16 @@ class DeconvolutionSV(Deconvolution):
                 tiptilt = tiptilt_init[seq, ...]
             
             # Initialization of the modes
-            modes = torch.ones((n_seq, self.n_f, self.n_modes, self.ngrid_modes, self.ngrid_modes))        
-            modes *= self.modes_init[None, None, :, None, None]
+            # account for softplus_scale: x = inv_softplus(tmp * scale) / scale
+            scale = self.config['optimization'].get('softplus_scale', 1.0)
+            
+            # Safe inverse softplus: for large values x ~= y, for small values use the log formula
+            threshold = 20.0
+            modes_val = torch.where(self.modes_init * scale > threshold, 
+                                  self.modes_init, 
+                                  torch.log(torch.exp(self.modes_init * scale) - 1.0 + 1e-10) / scale)
+            
+            modes = modes_val[None, None, :, None, None].repeat((n_seq, self.n_f, 1, self.ngrid_modes, self.ngrid_modes))
             
             # Variables to be optimized
             obj_infer = []
@@ -594,9 +605,10 @@ class DeconvolutionSV(Deconvolution):
                 self.loss.append(loss)
 
             if self.psf_model.lower() == 'nmf':
-                modes_infer = F.softplus(self.config['optimization']['softplus_scale'] * modes_infer) / self.config['optimization']['softplus_scale']
+                scale = self.config['optimization'].get('softplus_scale', 1.0)
+                modes_infer = F.softplus(scale * modes_infer) / scale
                 # modes_infer = F.relu(modes_infer, inplace=False)
-                modes_infer /= torch.sum(modes_infer, dim=2, keepdims=True)
+                modes_infer /= (torch.sum(modes_infer, dim=2, keepdims=True) + 1e-12)
 
             # Final interpolation of the tiptilt and modes to the appropriate sizes
             if (self.ngrid_modes != self.npix):                
