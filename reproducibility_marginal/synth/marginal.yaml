@@ -3,30 +3,24 @@ telescope:
     central_obscuration : 0.0
 
 images:
-    n_pixel : 88
+    n_pixel : 271
     pix_size : 0.059
-    apodization_border : 6
+    apodization_border : 0
 
 object1:
-    wavelength : 8542.0
+    wavelength : 6302.0
     image_filter: scharmer
-    cutoff : [0.85, 0.9]
-    s_u_joint: 100.0
-
-object2:
-    wavelength : 8542.0
-    image_filter: scharmer
-    cutoff : [0.85, 0.9]
+    cutoff : [0.85, 0.89]
     s_u_joint: 100.0
     
 optimization:
     gpu : 0
     transform : softplus
     softplus_scale : 1.0    
-    lr_obj : 0.02
-    lr_modes : 0.08
-    lr_prior : 0.5
+    lr_modes : 0.05
+    lr_prior : 0.05
     loss_type: marginal
+    stop_psd_optimization: 5  # Modes larger than
 
 regularization:
      iuwt1:
@@ -36,8 +30,9 @@ regularization:
 
 psf:
     model : kl
-    nmax_modes : 54
-    jitter : False
+    nmax_modes : 104
+    jitter : none
+    remove_tt : True
 
 initialization:
     object : contrast
@@ -46,15 +41,9 @@ initialization:
 annealing:
     type: linear
     start_pct : 0.1
-    end_pct : 0.6
+    end_pct : 0.8
 
-priors:
-    K:
-        mean: 1.0
-        sigma: 1.0
-    v0:
-        mean: 0.1
-        sigma: 1.0
-    p:
-        mean: 2.0
-        sigma: 2.0
+psd:
+    K: 100.0
+    v0: 0.1
+    p: 2.0

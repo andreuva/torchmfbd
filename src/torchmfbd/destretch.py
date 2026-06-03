@@ -42,6 +42,11 @@ def destretch(frames,
     if ndim == 3:        
         frames = frames[None, None, ...]
 
+    if ngrid == 1 and lambda_tt > 0.0:
+        print('Warning: Regularization is not applied when ngrid=1. Setting lambda_tt to 0.')
+        lambda_tt = 0.0
+
+
     device = frames.device
     n_seq, n_o, n_f, n_x, n_y = frames.shape
 

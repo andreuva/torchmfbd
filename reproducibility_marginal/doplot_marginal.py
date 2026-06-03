@@ -2,6 +2,9 @@ import numpy as np
 import matplotlib.pyplot as pl
 from astropy.io import fits
 import torchmfbd
+from mpl_toolkits.axes_grid1 import make_axes_locatable
+import h5py
+from scipy import ndimage
 
 def crisp(save=False):
     spot_8542_joint = fits.open('spot_8542/spot_8542_joint.fits')
@@ -16,7 +19,7 @@ def crisp(save=False):
     nx_qs_8542 = qs_8542_joint[0].data.shape[1]
     pix = 0.059
 
-    fig, ax = pl.subplots(nrows=4, ncols=4, figsize=(19, 19), sharex=True, sharey=True, tight_layout=True)
+    fig, ax = pl.subplots(nrows=4, ncols=4, figsize=(19, 19), sharex=True, sharey=True, constrained_layout=True)
 
     vmins = [0.2, 0.3]
     vmaxs = [2.1, 2.3]
@@ -88,9 +91,15 @@ def crisp(save=False):
                       color='yellow',
                       fontweight='bold')
 
+    
+    
+    fig.supxlabel('X [arcsec]', fontsize=22)
+    fig.supylabel('Y [arcsec]', fontsize=22)
 
-    fig.supxlabel('X [arcsec]')
-    fig.supylabel('Y [arcsec]')
+    for axis in ax.flat:
+        axis.tick_params(axis='both', which='major', labelsize=16)
+    
+
 
     # # Use tight_layout to adjust the layout
     # fig.tight_layout(rect=[0, 0, 1, 0.95])  # Leave space at the top for colorbars
@@ -105,7 +114,7 @@ def crisp(save=False):
     # # cbar2.set_label('Intensity (Column 2)', fontsize=12)
 
     if save:
-        pl.savefig('figs_marginal/images_8542.pdf', dpi=300)
+        pl.savefig('figs/images_8542.pdf', dpi=300)
 
 
     fig, ax = pl.subplots(nrows=2, ncols=1, figsize=(7.5, 15), tight_layout=True, sharex=True)
@@ -115,8 +124,8 @@ def crisp(save=False):
     # QS    
     im = qs_8542_joint[0].data[0, ...][1:-1, 1:-1]
     kk, power = torchmfbd.util.azimuthal_power(im / np.nanmean(im), apodization=10, angles=[-45,45], range_angles=15)
-    pars_s0 = np.mean(qs_8542_marginal[5].data, axis=0)
-    K, v0, p, s2 = pars_s0
+    pars_s0 = qs_8542_marginal[5].data
+    K, v0, p = pars_s0
     cutoff = 100.0 / (8542 * 1e-8) / 206265.0
     nu = kk / cutoff / pix_crisp
     # s_u = K / (1.0 + (nu / v0)**p) / im.shape[0]
@@ -160,8 +169,9 @@ def crisp(save=False):
     # Spot    
     im = spot_8542_joint[0].data[0, ...][1:-1, 1:-1]
     kk, power = torchmfbd.util.azimuthal_power(im / np.nanmean(im), apodization=10, angles=[-45,45], range_angles=15)    
-    pars_s0 = np.mean(spot_8542_marginal[5].data, axis=0)
-    K, v0, p, s2 = pars_s0
+    # pars_s0 = np.mean(spot_8542_marginal[5].data, axis=0)
+    pars_s0 = spot_8542_marginal[5].data
+    K, v0, p = pars_s0
     cutoff = 100.0 / (8542 * 1e-8) / 206265.0
     nu = kk / cutoff / pix_crisp
     # s_u = K / (1.0 + (nu / v0)**p) / im.shape[0]
@@ -209,30 +219,31 @@ def crisp(save=False):
     ax[1].set_xlim([3e-3, 0.6])
 
     if save:
-        pl.savefig('figs_marginal/power_8542.pdf', dpi=300)
+        pl.savefig('figs/power_8542.pdf', dpi=300)
     
 
 def hifi(save=False):
     gband_joint = fits.open('hifi/gband_joint.fits')
+    gband_jitter_joint = fits.open('hifi/gband_joint_jitter.fits')
     gband_marginal = fits.open('hifi/gband_marginal.fits')
-    gband_speckle = fits.open('obs/gband_bluec/hifiplus1_20230721_085151_sd_speckle.fts')
+    gband_speckle = fits.open('../reproducibility/obs/gband_bluec/hifiplus1_20230721_085151_sd_speckle.fts')
 
-    tio = fits.open('hifi/tio.fits')
-    tio_speckle = fits.open('obs/ca3968_tio/hifiplus3_20230721_094744_sd_tio_speckle.fts')
+    tio = fits.open('../reproducibility/hifi/tio.fits')
+    tio_speckle = fits.open('../reproducibility/obs/ca3968_tio/hifiplus3_20230721_094744_sd_tio_speckle.fts')
 
-    ca3968 = fits.open('hifi/ca3968.fits')
-    ca3968_speckle = fits.open('obs/ca3968_tio/hifiplus3_20230721_094744_sd_ca_speckle.fts')
+    ca3968 = fits.open('../reproducibility/hifi/ca3968.fits')
+    ca3968_speckle = fits.open('../reproducibility/obs/ca3968_tio/hifiplus3_20230721_094744_sd_ca_speckle.fts')
 
     nx_gband = gband_joint[0].data.shape[0]
     pix_gband = 0.02489
 
     vmin = 0.3
     vmax = 1.5
-
+    
     npix = nx_gband
     npix = 512
     
-    fig, ax = pl.subplots(nrows=1, ncols=4, figsize=(20, 5), tight_layout=True, sharex=True, sharey=True)
+    fig, ax = pl.subplots(nrows=1, ncols=5, figsize=(25, 5), tight_layout=True, sharex=True, sharey=True)
 
     for i in range(2):
         im = gband_joint[i].data[1:-1, 1:-1][0:npix, 0:npix]
@@ -257,12 +268,23 @@ def hifi(save=False):
                         color='yellow',
                         fontweight='bold')
     
-    im = gband_speckle[0].data[8:nx_gband-32, 8:nx_gband-32][0:npix, 0:npix]
+    im = gband_jitter_joint[1].data[1:-1, 1:-1][0:npix, 0:npix]
     im /= np.mean(im[0:120, 0:120])
     contrast = np.nanstd(im[0:120, 0:120]) / np.nanmean(im[0:120, 0:120]) * 100.0
     ax[3].imshow(im, extent=[0, nx_gband*pix_gband, 0, nx_gband*pix_gband], cmap='gray', vmin=vmin, vmax=vmax)
     ax[3].text(0.7, 0.95, f'{contrast:.2f}%',
-                          transform=ax[3].transAxes, 
+                        transform=ax[3].transAxes, 
+                        fontsize=18, 
+                        verticalalignment='top', 
+                        color='yellow',
+                        fontweight='bold')
+    
+    im = gband_speckle[0].data[8:nx_gband-32, 8:nx_gband-32][512:512+npix, 512:512+npix]
+    im /= np.mean(im[0:120, 0:120])
+    contrast = np.nanstd(im[0:120, 0:120]) / np.nanmean(im[0:120, 0:120]) * 100.0
+    ax[4].imshow(im, extent=[0, nx_gband*pix_gband, 0, nx_gband*pix_gband], cmap='gray', vmin=vmin, vmax=vmax)
+    ax[4].text(0.7, 0.95, f'{contrast:.2f}%',
+                          transform=ax[4].transAxes, 
                           fontsize=18, 
                           verticalalignment='top', 
                           color='yellow',
@@ -285,7 +307,8 @@ def hifi(save=False):
     ax[0].set_title('Frame')
     ax[1].set_title('Joint')
     ax[2].set_title('Marginal')
-    ax[3].set_title('Speckle')
+    ax[3].set_title('Jitter Joint')
+    ax[4].set_title('Speckle')
 
     if save:
         pl.savefig('figs_marginal/images_hifi.pdf', dpi=300)
@@ -914,10 +937,12 @@ def crisp_nimages(which=[0, 1], save=False, obs='qs_8542'):
 
 def crisp_su(which=[0, 1], save=False, obs='qs_8542'):
     # qs_8542_joint = fits.open(f'{obs}/{obs}_joint.fits')    
-    qs_8542_joint_10 = fits.open(f'{obs}/{obs}_joint_su_10.0.fits')
-    qs_8542_joint_100 = fits.open(f'{obs}/{obs}_joint_su_100.0.fits')
-    qs_8542_joint_1000 = fits.open(f'{obs}/{obs}_joint_su_1000.0.fits')
-    qs_8542_joint_10000 = fits.open(f'{obs}/{obs}_joint_su_10000.0.fits')
+    
+    qs_joint = [None] * 6
+    su = [1.0, 10.0, 100.0, 1000.0, 10000.0]
+
+    for i, s in enumerate(su):
+        qs_joint[i] = fits.open(f'{obs}/{obs}_joint_su_{s}.fits')
 
     qs_8542_marginal = fits.open(f'{obs}/{obs}_marginal.fits')    
     
@@ -928,86 +953,387 @@ def crisp_su(which=[0, 1], save=False, obs='qs_8542'):
 
     if 0 in which:
 
-        fig, ax = pl.subplots(nrows=5, ncols=1, figsize=(7, 20), tight_layout=True)
+        fig, ax = pl.subplots(nrows=3, ncols=2, figsize=(14, 18), tight_layout=True, sharex=True, sharey=True)
     
-        img = qs_8542_joint_10[1].data[0, ...]
-        im = ax[0].imshow(img, origin='lower', cmap='gray')
-        pl.colorbar(im, ax=ax[0])
-        ax[0].set_title(r'QS 8542 - Joint $\sigma^2/S_u=1.4\times 10^{-5}$')
-        contrast = np.nanstd(img) / np.nanmean(img) * 100.0
-        ax[0].text(0.75, 0.95, f'{contrast:.1f}%',
-                          transform=ax[0].transAxes, 
-                          fontsize=18, 
-                          verticalalignment='top', 
-                          color='yellow',
-                          fontweight='bold')
+        for i, s in enumerate(su):
+            img = qs_joint[i][1].data[0, ...]
+            im = ax.flat[i].imshow(img, origin='lower', cmap='gray', vmin=0.5, vmax=1.6, extent=[0, img.shape[1]*pix_crisp, 0, img.shape[0]*pix_crisp])
+            pl.colorbar(im, ax=ax.flat[i])
+            ax.flat[i].set_title(fr'QS 8542 - Joint $s_u={s}$')
+            contrast = np.nanstd(img) / np.nanmean(img) * 100.0
+            ax.flat[i].text(0.75, 0.95, f'{contrast:.1f}%',
+                              transform=ax.flat[i].transAxes, 
+                              fontsize=18, 
+                              verticalalignment='top', 
+                              color='yellow',
+                              fontweight='bold')
 
-        img = qs_8542_joint_100[1].data[0, ...]
-        im = ax[1].imshow(img, origin='lower', cmap='gray')
-        pl.colorbar(im, ax=ax[1])
-        ax[1].set_title(r'QS 8542 - Joint $\sigma^2/S_u=1.4\times 10^{-6}$')
-        contrast = np.nanstd(img) / np.nanmean(img) * 100.0
-        ax[1].text(0.75, 0.95, f'{contrast:.1f}%',
-                          transform=ax[1].transAxes, 
-                          fontsize=18, 
-                          verticalalignment='top', 
-                          color='yellow',
-                          fontweight='bold')
-
-        img = qs_8542_joint_1000[1].data[0, ...]
-        im = ax[2].imshow(img, origin='lower', cmap='gray')
-        pl.colorbar(im, ax=ax[2])
-        ax[2].set_title(r'QS 8542 - Joint $\sigma^2/S_u=1.4\times 10^{-7}$')
-        contrast = np.nanstd(img) / np.nanmean(img) * 100.0
-        ax[2].text(0.75, 0.95, f'{contrast:.1f}%',
-                          transform=ax[2].transAxes, 
-                          fontsize=18, 
-                          verticalalignment='top', 
-                          color='yellow',
-                          fontweight='bold')
-
-        img = qs_8542_joint_10000[1].data[0, ...]
-        im = ax[3].imshow(img, origin='lower', cmap='gray')
-        pl.colorbar(im, ax=ax[3])
-        ax[3].set_title(r'QS 8542 - Joint $\sigma^2/S_u=1.4\times 10^{-8}$')
-        contrast = np.nanstd(img) / np.nanmean(img) * 100.0
-        ax[3].text(0.75, 0.95, f'{contrast:.1f}%',
-                          transform=ax[3].transAxes, 
-                          fontsize=18, 
-                          verticalalignment='top', 
-                          color='yellow',
-                          fontweight='bold')
+        
 
         img = qs_8542_marginal[1].data[0, ...]
-        im = ax[4].imshow(img, origin='lower', cmap='gray')
-        pl.colorbar(im, ax=ax[4])
-        ax[4].set_title(r'QS 8542 - Marginal')
+        im = ax.flat[-1].imshow(img, origin='lower', cmap='gray', vmin=0.5, vmax=1.6, extent=[0, img.shape[1]*pix_crisp, 0, img.shape[0]*pix_crisp])
+        pl.colorbar(im, ax=ax.flat[-1])
+        ax.flat[-1].set_title(r'QS 8542 - Marginal')
         contrast = np.nanstd(img) / np.nanmean(img) * 100.0
-        ax[4].text(0.75, 0.95, f'{contrast:.1f}%',
-                          transform=ax[4].transAxes, 
+        ax.flat[-1].text(0.75, 0.95, f'{contrast:.1f}%',
+                          transform=ax.flat[-1].transAxes, 
                           fontsize=18, 
                           verticalalignment='top', 
                           color='yellow',
                           fontweight='bold')
+        
+        fig.supxlabel('X [arcsec]', fontsize=22)
+        fig.supylabel('Y [arcsec]', fontsize=22)
+
+        for axis in ax.flat:
+            axis.tick_params(axis='both', which='major', labelsize=16)
 
         if save:
-            pl.savefig('figs/qs_8542_noise.pdf', dpi=300)
+            pl.savefig('figs/qs_8542_su.pdf', dpi=300)
 
+def hifi_nimages(which=[0, 1], save=False):
+
+    nimages = [2, 10, 50]    
+    s_u = [10.0, 100.0, 1000.0]
+    gband_marginal = [None] * 3
+    for i, n in enumerate(nimages):        
+        gband_marginal[i] = fits.open(f'hifi/gband_marginal_nimages_{n}.fits')
+    
+    cutoff = 144.0 / (4300 * 1e-8) / 206265.0
+    diff_hifi = 1.22 * 4300e-8 / 144.0 * 206265.0
+    pix_hifi = 0.02761
+    
+    if 0 in which:
+
+        fig, ax = pl.subplots(nrows=4, ncols=3, figsize=(16, 21), sharex=True, sharey=True)
+
+        for j in range(3):
+            gband_joint = [None] * 3            
+            for k, n in enumerate(nimages):
+                gband_joint[k] = fits.open(f'hifi/gband_joint_nimages_{n}_su_{s_u[j]}.fits')
+                
+            for i, n in enumerate(nimages):
+                        
+                img = gband_joint[i][1].data[5:-5, 5:-5]
+                im = ax[j, i].imshow(img, cmap='gray', extent=[0, img.shape[1]*pix_hifi, 0, img.shape[0]*pix_hifi], vmin=0.8, vmax=1.4)
+                if i == 2:
+                    divider = make_axes_locatable(ax[j, i])
+                    cax = divider.append_axes("right", size="5%", pad=0.1)
+                    pl.colorbar(im, cax=cax)
+                ax[j, i].set_title(fr'G-band - Joint - M={n} - s$_u$={s_u[j]}')
+                contrast = np.nanstd(img) / np.nanmean(img) * 100.0
+                ax[j, i].text(0.75, 0.95, f'{contrast:.1f}%',
+                                transform=ax[j, i].transAxes, 
+                                fontsize=18, 
+                                verticalalignment='top', 
+                                color='yellow',
+                                fontweight='bold')
+                
+        for i, n in enumerate(nimages):
+            img = gband_marginal[i][1].data[5:-5, 5:-5]
+            im = ax[-1, i].imshow(img, cmap='gray', extent=[0, img.shape[1]*pix_hifi, 0, img.shape[0]*pix_hifi], vmin=0.8, vmax=1.4)
+            if i == 2:
+                divider = make_axes_locatable(ax[-1, i])
+                cax = divider.append_axes("right", size="5%", pad=0.1)
+                pl.colorbar(im, cax=cax)
+            ax[-1, i].set_title(f'G-band - Marginal - M={n}')
+            contrast = np.nanstd(img) / np.nanmean(img) * 100.0
+            ax[-1, i].text(0.75, 0.95, f'{contrast:.1f}%',
+                            transform=ax[-1, i].transAxes, 
+                            fontsize=18, 
+                            verticalalignment='top', 
+                            color='yellow',
+                            fontweight='bold')
+        
+        fig.supxlabel('X [arcsec]', fontsize=22)
+        fig.supylabel('Y [arcsec]', fontsize=22)
+
+        for axis in ax.flat:
+            axis.tick_params(axis='both', which='major', labelsize=16)
+
+        pl.tight_layout()
+
+        if save:
+            pl.savefig('figs/gband_nimages.pdf', dpi=300)
+
+    
+    if 1 in which:
+
+        fig, ax = pl.subplots(nrows=1, ncols=3, figsize=(20, 6), tight_layout=True, sharey=True)
+        
+        for i, n in enumerate(nimages):
+            for j in range(3):                
+                gband_joint = fits.open(f'hifi/gband_joint_nimages_{n}_su_{s_u[j]}.fits')
+            
+                kk, power = torchmfbd.util.azimuthal_power(gband_joint[1].data[5:-5, 5:-5], apodization=10, angles=[-45,45], range_angles=15)
+                ax[i].loglog(kk, power / 10.0**np.nanmean(np.log10(power[5:8])), label=f's$_u$={s_u[j]}', linewidth=2)
+
+            kk, power = torchmfbd.util.azimuthal_power(gband_marginal[i][1].data[5:-5, 5:-5], apodization=10, angles=[-45,45], range_angles=15)
+            ax[i].loglog(kk, power / 10.0**np.nanmean(np.log10(power[5:8])), label='Marginal', linewidth=2)
+
+            kk, power = torchmfbd.util.azimuthal_power(gband_marginal[i][0].data[5:-5, 5:-5], apodization=10, angles=[-45,45], range_angles=15)
+            ax[i].loglog(kk, power / 10.0**np.nanmean(np.log10(power[5:8])), label='Frame', linewidth=2)
+
+            ax[i].set_ylim([1e-13, 10.0])
+            ax[i].set_xlim([5e-3, 0.8])
+
+            ax[i].axvline(1.0 / (diff_hifi / pix_hifi), color='black')
+        
+        ax[0].legend(fontsize=18)
+
+        ax[0].set_title('G-band - M=2', fontsize=18)
+        ax[1].set_title('G-band - M=10', fontsize=18)
+        ax[2].set_title('G-band - M=50', fontsize=18)
+
+        fig.supxlabel('Spatial frequency [1/pix]', fontsize=22)
+        fig.supylabel('Power [normalized]', fontsize=22)
+
+        for axis in ax.flat:
+            axis.tick_params(axis='both', which='major', labelsize=16)
+
+        if save:
+            pl.savefig('figs/gband_azimuthal_power_nimages.pdf', dpi=300)
+
+def hifi_nmodes(which=[0, 1], save=False):
+
+    nmodes = [44, 90, 230]
+    s_u = [10.0, 100.0, 1000.0]
+    gband_marginal = [None] * 3
+    for i, n in enumerate(nmodes):        
+        gband_marginal[i] = fits.open(f'hifi/gband_marginal_nmodes_{n}.fits')
+    
+    cutoff = 144.0 / (4300 * 1e-8) / 206265.0
+    diff_hifi = 1.22 * 4300e-8 / 144.0 * 206265.0
+    pix_hifi = 0.02761
+    
+    if 0 in which:
+
+        fig, ax = pl.subplots(nrows=4, ncols=3, figsize=(16, 21), sharex=True, sharey=True)
+
+        for j in range(3):
+            gband_joint = [None] * 3            
+            for k, n in enumerate(nmodes):
+                gband_joint[k] = fits.open(f'hifi/gband_joint_nmodes_{n}_su_{s_u[j]}.fits')
+                
+            for i, n in enumerate(nmodes):
+                        
+                img = gband_joint[i][1].data[5:-5, 5:-5]
+                im = ax[j, i].imshow(img, cmap='gray', extent=[0, img.shape[1]*pix_hifi, 0, img.shape[0]*pix_hifi], vmin=0.8, vmax=1.4)
+                if i == 2:
+                    divider = make_axes_locatable(ax[j, i])
+                    cax = divider.append_axes("right", size="5%", pad=0.1)
+                    pl.colorbar(im, cax=cax)
+                ax[j, i].set_title(fr'G-band - Joint - N$_m$={n} - s$_u$={s_u[j]}')
+                contrast = np.nanstd(img) / np.nanmean(img) * 100.0
+                ax[j, i].text(0.75, 0.95, f'{contrast:.1f}%',
+                                transform=ax[j, i].transAxes, 
+                                fontsize=18, 
+                                verticalalignment='top', 
+                                color='yellow',
+                                fontweight='bold')
+                
+        for i, n in enumerate(nmodes):
+            img = gband_marginal[i][1].data[5:-5, 5:-5]
+            im = ax[-1, i].imshow(img, cmap='gray', extent=[0, img.shape[1]*pix_hifi, 0, img.shape[0]*pix_hifi], vmin=0.8, vmax=1.4)
+            if i == 2:
+                divider = make_axes_locatable(ax[-1, i])
+                cax = divider.append_axes("right", size="5%", pad=0.1)
+                pl.colorbar(im, cax=cax)
+            ax[-1, i].set_title(fr'G-band - Marginal - N$_m$={n}')
+            contrast = np.nanstd(img) / np.nanmean(img) * 100.0
+            ax[-1, i].text(0.75, 0.95, f'{contrast:.1f}%',
+                            transform=ax[-1, i].transAxes, 
+                            fontsize=18, 
+                            verticalalignment='top', 
+                            color='yellow',
+                            fontweight='bold')
+        
+        fig.supxlabel('X [arcsec]', fontsize=22)
+        fig.supylabel('Y [arcsec]', fontsize=22)
+
+        for axis in ax.flat:
+            axis.tick_params(axis='both', which='major', labelsize=16)
+
+        pl.tight_layout()
+
+        if save:
+            pl.savefig('figs/gband_nmodes.pdf', dpi=300)
+
+    
+    if 1 in which:
+
+        fig, ax = pl.subplots(nrows=1, ncols=3, figsize=(20, 6), tight_layout=True, sharey=True)
+        
+        for i, n in enumerate(nmodes):
+            for j in range(3):                
+                gband_joint = fits.open(f'hifi/gband_joint_nmodes_{n}_su_{s_u[j]}.fits')
+            
+                kk, power = torchmfbd.util.azimuthal_power(gband_joint[1].data[5:-5, 5:-5], apodization=10, angles=[-45,45], range_angles=15)
+                ax[i].loglog(kk, power / 10.0**np.nanmean(np.log10(power[5:8])), label=f's$_u$={s_u[j]}', linewidth=2)
+
+            kk, power = torchmfbd.util.azimuthal_power(gband_marginal[i][1].data[5:-5, 5:-5], apodization=10, angles=[-45,45], range_angles=15)
+            ax[i].loglog(kk, power / 10.0**np.nanmean(np.log10(power[5:8])), label='Marginal', linewidth=2)
+
+            kk, power = torchmfbd.util.azimuthal_power(gband_marginal[i][0].data[5:-5, 5:-5], apodization=10, angles=[-45,45], range_angles=15)
+            ax[i].loglog(kk, power / 10.0**np.nanmean(np.log10(power[5:8])), label='Frame', linewidth=2)
+
+            ax[i].set_ylim([1e-13, 10.0])
+            ax[i].set_xlim([5e-3, 0.8])
+
+            ax[i].axvline(1.0 / (diff_hifi / pix_hifi), color='black')
+        
+        ax[0].legend(fontsize=18)
+
+        ax[0].set_title('G-band - N$_m$=44', fontsize=18)
+        ax[1].set_title('G-band - N$_m$=90', fontsize=18)
+        ax[2].set_title('G-band - N$_m$=230', fontsize=18)
+
+        fig.supxlabel('Spatial frequency [1/pix]', fontsize=22)
+        fig.supylabel('Power [normalized]', fontsize=22)
+
+        for axis in ax.flat:
+            axis.tick_params(axis='both', which='major', labelsize=16)
+            
+
+        if save:
+            pl.savefig('figs/gband_azimuthal_power_nmodes.pdf', dpi=300)
+
+def plot_K(save=False):
+    image = np.array(fits.open('synth/FeI_6302_cont.fits')[0].data).astype(np.float32)
+    pix_simulation = 0.0139
+    pix_crisp = 0.059
+    zoom = pix_simulation / pix_crisp
+    image = ndimage.zoom(image, zoom=zoom, order=1)
+
+    r0s = [10, 15, 20, 30]
+
+    f_marginal = []
+    f_joint = []
+
+    for r0 in r0s:
+
+        f = h5py.File(f'synth/nmodes_marginal_r0_{r0}.h5', 'r')
+        f_marginal.append(f)
+        f = h5py.File(f'synth/nmodes_joint_r0_{r0}.h5', 'r')
+        f_joint.append(f)
+
+    modes = [5, 9, 14, 20, 27, 35, 44, 65, 90, 119]
+    
+    fig, ax = pl.subplots(nrows=2, ncols=2, figsize=(15, 12), tight_layout=True, sharex=True)
+    
+    for i in range(len(r0s)):
+        ax[0, 0].plot(modes, f_marginal[i]['loss'][:], label=fr'r0={r0s[i]} cm', linewidth=2)
+        ax[0, 1].plot(modes, f_joint[i]['loss'][:, -1], label=fr'r0={r0s[i]} cm', linewidth=2)
+
+        std_joint = np.zeros(len(modes))
+        std_marginal = np.zeros(len(modes))
+
+        for j in range(len(modes)):
+            res_joint = f_joint[i]['obj'][j, 5:-5, 5:-5] - image[5:-5, 5:-5]
+            res_marginal = f_marginal[i]['obj'][j, 5:-5, 5:-5] - image[5:-5, 5:-5]
+
+            std_joint[j] = np.std(res_joint)
+            std_marginal[j] = np.std(res_marginal)
+
+        ax[1, 0].plot(modes, std_marginal, label=fr'r$_0$={r0s[i]} cm', linewidth=2)
+        ax[1, 1].plot(modes, std_joint, label=fr'r$_0$={r0s[i]} cm', linewidth=2)
+    
+    ax[0, 0].set_title('Marginal', fontsize=22)
+    
+    ax[0, 0].set_ylabel('Final Loss', fontsize=22)
+    ax[0, 1].set_title('Joint', fontsize=22)
+
+    ax[1, 0].set_ylim([0, 0.2])
+    ax[1, 1].set_ylim([0, 0.2])
+    ax[1, 0].legend(fontsize=18)
+
+    ax[1, 0].set_ylabel('Std of Residuals', fontsize=22)
+    
+    fig.supxlabel('Number of KL modes', fontsize=22)
+
+    for axis in ax.flat:
+        axis.tick_params(axis='both', which='major', labelsize=16)
+
+    if save:
+        pl.savefig('figs/nmodes_synth.pdf', dpi=300)
+
+    # fig, ax = pl.subplots(nrows=4, ncols=len(modes)+1, figsize=(24, 16), tight_layout=True, sharex=True, sharey=True)
+    # for i, n_m in enumerate(modes):
+    #     ax[0, i].imshow(f_marginal['obj'][i, 5:-5, 5:-5], vmin=0.7, vmax=1.7)
+    #     ax[0, i].set_title(f"{n_m} modes")
+    #     ax[2, i].imshow(f_joint['obj'][i, 5:-5, 5:-5], vmin=0.7, vmax=1.7)
+        
+    #     ax[1, i].imshow(f_marginal['obj'][i, 5:-5, 5:-5] - image[5:-5, 5:-5], vmin=-0.1, vmax=0.1)        
+    #     ax[1, i].set_title(f"<{np.std(f_marginal['obj'][i, 5:-5, 5:-5] - image[5:-5, 5:-5]):.3f}>")
+    #     ax[3, i].imshow(f_joint['obj'][i, 5:-5, 5:-5] - image[5:-5, 5:-5], vmin=-0.1, vmax=0.1)
+    #     ax[3, i].set_title(f"<{np.std(f_joint['obj'][i, 5:-5, 5:-5] - image[5:-5, 5:-5]):.3f}>")
+
+    # for i in range(4):
+    #     ax[i, -1].imshow(image[5:-5, 5:-5], vmin=0.7, vmax=1.7)
+    # ax[0, -1].set_title("Original Image")
+
+    # ax[0, 0].set_ylabel('Marginal')
+    # ax[2, 0].set_ylabel('Joint')
+    
+    for file in f_marginal:
+        file.close()
+    for file in f_joint:
+        file.close()
+
+def hyperpriors(save=False):
+    fig, ax = pl.subplots(tight_layout=True)
+
+    x = np.logspace(-3, 2, 300)
+
+    # K hyperprior
+    mu = 1.0
+    sigma = 0.3
+    prior = np.exp(-(0.5*(np.log(x)-np.log(mu))**2/sigma**2-np.log(x)))
+    ax.semilogx(x,prior / np.max(prior), label=r'$\beta$=K')
+
+    # nu0 hyperprior
+    mu = 0.1
+    sigma = 0.5
+    prior = np.exp(-(0.5*(np.log(x)-np.log(mu))**2/sigma**2-np.log(x)))
+    ax.semilogx(x,prior / np.max(prior), label=r'$\beta=u_0$')
+
+    ax.set_xlabel(r'$\beta$')
+    ax.set_ylabel(r'Normalized hyperprior $p(\beta)$')    
+    ax.legend()
+
+    ax.set_xlim([1e-2, 10.0])
+
+    if save:
+        pl.savefig('figs/hyperpriors.pdf', dpi=300)
 
 if __name__ == '__main__':
 
     pl.close('all')
 
-    save = False
-
+    save = True
+    
+    # Paper
     # crisp(save)
+    # crisp_su(which=[0], save=save, obs='qs_8542')
+    hifi_nimages(which=[1], save=save)
+    hifi_nmodes(which=[1], save=save)
+    # plot_K(save=save)
+
+
 
     # crisp_noise(which=[0, 1], save=save, obs='qs_8542')
 
-    crisp_nimages(which=[0, 1], save=save, obs='qs_8542')
+    # crisp_nimages(which=[0, 1], save=save, obs='qs_8542')
 
-    # crisp_su(which=[0], save=save, obs='qs_8542')
+    
         
     # hifi(save)
 
+    
+
+    
+
+    # hyperpriors(save=save)
+
     #power(save)
+

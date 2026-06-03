@@ -11,6 +11,7 @@ __pycache__/
 *.fts
 *.h5
 *.fits
+*.pdf
 
 # Distribution / packaging
 .Python

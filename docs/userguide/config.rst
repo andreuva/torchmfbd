@@ -28,11 +28,13 @@ Spatially invariant
         wavelength : 8542.0
         image_filter: tophat
         cutoff : [0.75, 0.80]
+        s_u_joint : 100.0
 
     object2:
         wavelength : 8542.0
         image_filter: tophat
         cutoff : [0.75, 0.80]
+        s_u_joint : 100.0
         
     optimization:
         gpu : 0
@@ -40,6 +42,7 @@ Spatially invariant
         softplus_scale : 1.0        
         lr_obj : 0.02
         lr_modes : 0.08
+        loss_type : joint
         show_object_info: False
 
     regularization:
@@ -58,7 +61,7 @@ Spatially invariant
         modes_std : 0.0
 
     annealing:
-        type: sigmoid
+        type: linear
         start_pct : 0.0
         end_pct : 0.85
 
@@ -85,6 +88,7 @@ starting from 1.
 * ``wavelength`` : wavelength of the object in angstroms
 * ``image_filter`` : Fourier filter to be used for the image. Options are ``tophat`` (a simple tophat filter to avoid frequencies above the cutoff) or ``scharmer`` (the filter from Lofdahl & Scharmer 1994).
 * ``cutoff`` : cutoff frequency. The first element indicates the cutoff frequency below which the filter is 1. The second element marks the frequency above which the filter is 0. In between, a smooth transition is built. All are given in units of the diffraction limit.
+* ``s_u_joint`` : Estimation of the power spectrum of the object. This is relevant only if the ``joint`` loss is used.
 
 optimization
 ^^^^^^^^^^^^
@@ -94,6 +98,7 @@ optimization
 * ``lr_obj`` : learning rate for the object
 * ``lr_modes`` : learning rate for the modes
 * ``show_object_info`` : if True, the object information (contrast, minimum and maximum) is shown during the optimization
+* ``loss_type`` : type of loss to be used. Options are ``joint`` (which uses a joint loss on the object and the modes) or ``marginal`` (which uses the marginal loss on the modes only)
 
 regularization
 ^^^^^^^^^^^^^^

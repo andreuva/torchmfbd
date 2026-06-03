@@ -108,11 +108,15 @@ class Patchify4D(object):
             x2 = x.clone()
             mask = self.mask.clone()
 
-        mask = mask.to(x.device)        
+        mask = mask.to(x.device)
 
         if apodization > 0:
-            x2 = x2[:, :, apodization:-apodization, apodization:-apodization]
-            mask = mask[:, :, apodization:-apodization, apodization:-apodization]
+            if self.flatten_sequences:
+                x2 = x2[:, :, apodization:-apodization, apodization:-apodization]
+                mask = mask[:, :, apodization:-apodization, apodization:-apodization]
+            else:
+                x2 = x2[:, :, :, apodization:-apodization, apodization:-apodization]
+                mask = mask[:, :, :, apodization:-apodization, apodization:-apodization]
 
         # Weight
         if weight_type is None:
@@ -148,9 +152,13 @@ class Patchify4D(object):
                         
         output_size = (new_size_x, new_size_y)
         
-        # Apply the weighting to the patches        
-        x2 *= self.weight[None, None, :, :]
-        mask *= self.weight[None, None, :, :]
+        # Apply the weighting to the patches                
+        if self.flatten_sequences:            
+            x2 *= self.weight[None, None, :, :]
+            mask *= self.weight[None, None, :, :]
+        else:            
+            x2 *= self.weight[None, None, None, :, :]
+            mask *= self.weight[None, None, None, :, :]
                 
         if self.flatten_sequences:
             x2 = rearrange(x2, '(n L) f x y -> (n) (f x y) L', n=self.n_scans, L=self.n_patches)
@@ -174,7 +182,7 @@ class Patchify4D(object):
     
 if __name__ == '__main__':
     n_scans = 1    
-    n_frames = 12
+    n_frames = 2
     n_x = 80
     n_y = 80
     
@@ -182,6 +190,27 @@ if __name__ == '__main__':
 
     p = Patchify4D()
 
-    patches = p.patchify(frames, patch_size=20, stride_size=10)
+    print('Flatten sequence = True')
+    print('-------------------------')
 
+    patches = p.patchify(frames, patch_size=20, stride_size=10, flatten_sequences=True)
+    print(f'  - Original : {frames.shape}')
+    print(f'  - Patches : {patches.shape}')
+
+    out = p.unpatchify(patches, apodization=3)    
+    print(f'  - Reconstructed : {out.shape}')
+
+    out = p.unpatchify(patches[:, 0:1, :, :], apodization=3)    
+    print(f'  - Reconstructed (single): {out.shape}')
+
+
+    print('Flatten sequence = False')
+    print('-------------------------')
+    patches = p.patchify(frames, patch_size=20, stride_size=10, flatten_sequences=False)
+    
+    print(f'  - Original : {frames.shape}')
+    print(f'  - Patches : {patches.shape}')
+    
     out = p.unpatchify(patches, apodization=3)
+    
+    print(f'  - Reconstructed : {out.shape}')

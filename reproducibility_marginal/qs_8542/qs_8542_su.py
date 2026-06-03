@@ -16,7 +16,7 @@ if __name__ == '__main__':
     lam = 7  # +65 mA
     xy0 = [200, 200]
     npix = 512
-    obs_file = f"../obs/qs_20190801_081547_8542_npix512_original.h5"
+    obs_file = f"../../reproducibility/obs/qs_20190801_081547_8542_npix512_original.h5"
 
     if (os.path.exists(obs_file)):
         print(f'Reading observations from {obs_file}...')
@@ -50,7 +50,7 @@ if __name__ == '__main__':
         f.create_dataset('im', data=im)
         f.close()
     
-    for s_u in [10.0, 100.0, 1000.0, 10000.0]:
+    for s_u in [0.1, 1.0, 10.0, 100.0, 1000.0, 10000.0]:
         frames = im[:, :, :, 0:npix, 0:npix]
 
         frames /= np.mean(frames, axis=(-1, -2), keepdims=True)
@@ -99,8 +99,8 @@ if __name__ == '__main__':
             best_frame.append(patchify.unpatchify(frames_patches[i][:, ind_best_contrast, :, :], apodization=6, weight_type='cosine', weight_params=30).cpu().numpy())
         
         mfbd = [None] * 2
-        mfbd[0] = fits.open('../aux/camXX_2019-08-01T08:15:47_00010_8542_8542_+65_lc0.fits')[0].data[None, :, ::-1]    
-        mfbd[1] = fits.open('../aux/camXXV_2019-08-01T08:15:47_00010_8542_8542_+65_lc0.fits')[0].data[None, :, ::-1]
+        mfbd[0] = fits.open('../../reproducibility/aux/camXX_2019-08-01T08:15:47_00010_8542_8542_+65_lc0.fits')[0].data[None, :, ::-1]    
+        mfbd[1] = fits.open('../../reproducibility/aux/camXXV_2019-08-01T08:15:47_00010_8542_8542_+65_lc0.fits')[0].data[None, :, ::-1]
         
         # Save the object as a fits file
         best_frame = np.concatenate([best_frame[0][0:1, ...], best_frame[1][0:1, ...]], axis=0)
