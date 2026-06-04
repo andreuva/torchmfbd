@@ -13,6 +13,7 @@ __pycache__/
 *.fits
 *.png
 *.gif
+*.pdf
 
 # Distribution / packaging
 .Python

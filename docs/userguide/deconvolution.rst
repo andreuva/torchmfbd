@@ -43,11 +43,13 @@ be defined in the code as a dictionary:
         wavelength : 8542.0
         image_filter: tophat
         cutoff : [0.75, 0.80]
+        s_u_joint: 250.0
 
     object2:
         wavelength : 8542.0
         image_filter: tophat
         cutoff : [0.75, 0.80]
+        s_u_joint: 250.0
         
     optimization:
         gpu : 0
@@ -55,7 +57,8 @@ be defined in the code as a dictionary:
         softplus_scale : 1.0        
         lr_obj : 0.02
         lr_modes : 0.08
-        shod_object_info : False
+        show_object_info : False
+        loss_type : joint
 
     regularization:
         iuwt1:
@@ -86,7 +89,7 @@ The deconvolution can be carried out by the following code:
     frames_patches = [None] * 2
     for i in range(2):        
         frames_patches[i] = patchify.patchify(frames[:, i, :, :, :], patch_size=64, stride_size=50, flatten_sequences=True)
-        decSI.add_frames(frames_patches[i], id_object=i, id_diversity=0, diversity=0.0)
+        deconv.add_frames(frames_patches[i], id_object=i, id_diversity=0, diversity=0.0)
             
     
     deconv.deconvolve(infer_object=False, 
@@ -109,11 +112,23 @@ The deconvolution can be carried out by the following code:
 
     deconv.write('output.fits')
 
-First, we instantiate the ``torchmfbd.Deconvolution`` class with the configuration file. We then patchify the frames and 
-add them to the deconvolution object. The field of view is mosaicked into patches of size 64x64 with a stride of 50 pixels, so 
+We start from a set of frames of shape ``(n_sequences, n_objects, n_frames, n_pixel, n_pixel)``. The first dimension
+define the sequence (for instance, wavelength position, modulation state, etc.) that you want to 
+deconvolve in parallel. The second defines the object (for instance, wide-band and narrow-band) that are assumed to 
+be affected by the same wavefront at each time. The third dimension defines the number of frames per sequence and object. 
+The last two dimensions define the size of the frames.
+
+
+We first instantiate the ``torchmfbd.Deconvolution`` class with the configuration file. We then patchify the frames and 
+add them to the deconvolution object. The ``add_frames`` method needs a tensor of shape ``(n_patches, n_frames, n_pixel, n_pixel)`` 
+and takes care of estimating the noise in the frames, which is needed for the deconvolution. All patches will be deconvolved in 
+parallel, so that the deconvolution is sped up. The number of patches to deconvolve simultaneously can be controlled 
+by the ``simultaneous_sequences`` argument of the ``deconvolve`` method.
+
+In this example, the field of view is mosaicked into patches of size 64x64 with a stride (step) of 50 pixels, so 
 that they overlap. The frames are added object by object, indicating the index of the object ``id_object`` and the index of the
 diversity channel ``id_diversity``. In this case, we have two objects and no diversity channel, so we set ``id_diversity=0`` and
-``diversity=0.0``. You can add as many objects and diversity channels per object as you want.
+``diversity=0.0``. You can add as many objects and diversity channels per object as you want or have.
 
 The deconvolution is carried out by calling the ``deconvolve`` method. The method takes several arguments:
 

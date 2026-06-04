@@ -35,7 +35,7 @@ def _check_config(config):
     
     if "lr_obj" not in config["optimization"]:
         config["optimization"]["lr_obj"] = 0.01
-    
+
     if "lr_modes" not in config["optimization"]:
         config["optimization"]["lr_modes"] = 0.01
     
@@ -59,7 +59,7 @@ def _check_config(config):
     
     if config["annealing"]["type"] not in ["sigmoid", "linear", "none"]:
         raise ValueError(f"Invalid value for annealing type. It is {config['annealing']['type']} but should be sigmoid, linear or none")
-    
+        
     if config["psf"]["model"] not in ["zernike", "kl", "pca", "nmf"]:
         raise ValueError(f"Invalid value for psf model. It is {config['psf']['model']} but should be zernike, kl, pca or nmf")
     
@@ -75,7 +75,6 @@ def _check_config(config):
         config["psd"]["K"] = 100.0
         config["psd"]["v0"] = 0.1
         config["psd"]["p"] = 2.0
-
     # Retain priors block fallback if present for backward compatibility
     if "priors" not in config:
         config["priors"] = {}

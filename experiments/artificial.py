@@ -46,29 +46,26 @@ def generate_image_with_aapsd(size, D, wavelength, pixel_size, K, v0, beta, mean
     return result, f_filter
 
 pl.close('all')
+show = False
 # Example: Generate 'Pink Noise' (beta=1)
 
-KK = np.zeros(9)
-mn = np.zeros(9)
-for i, Ks in enumerate([1.0, 3, 10.0, 30.0, 100.0, 300.0, 1000.0, 3000.0, 10000.0]):
+K_all = [0.1, 0.3, 1.0, 3, 10.0, 30.0, 100.0, 300.0, 1000.0, 3000.0, 10000.0]
+KK = np.zeros(len(K_all))
+K_from_s2 = np.zeros(len(K_all))
+s2 = np.zeros(len(K_all))
+
+for i, Ks in enumerate(K_all):
     D = 100.0
     wavelength = 8542
     pixel_size = 0.059
     K = Ks
     v0 = 0.1
-    beta = 2.0
-    mean_image = 1.0
-    noise = 0.5
+    beta = 2.5
+    mean_image = 0.0
+    noise = 0.0
     cutoff = D / (wavelength * 1e-8) / 206265.0
 
-    img, psd = generate_image_with_aapsd((512, 512), D=D, wavelength=wavelength, pixel_size=pixel_size, K=K, v0=v0, beta=beta, mean_image=mean_image)
-
-    fig, ax = pl.subplots(nrows=1, ncols=2, figsize=(12, 6))
-
-    tmp = ax[0].imshow(img, cmap='gray')
-    pl.colorbar(tmp, ax=ax[0])
-    ax[0].set_title("Synthesized Image (AAPSD $1/f^2$)")
-    ax[0].axis('off')
+    img, sqrt_psd = generate_image_with_aapsd((512, 512), D=D, wavelength=wavelength, pixel_size=pixel_size, K=K, v0=v0, beta=beta, mean_image=mean_image)
 
     im_noise = img + noise * np.random.normal(size=img.shape)
     f = np.fft.fft2(im_noise, norm='ortho')
@@ -78,12 +75,28 @@ for i, Ks in enumerate([1.0, 3, 10.0, 30.0, 100.0, 300.0, 1000.0, 3000.0, 10000.
 
     nu = kk / cutoff / pixel_size
 
-    ax[1].loglog(kk, power)
-    ax[1].loglog(kk, K / (1.0 + (nu/v0)**2)**(beta / 2.0))
-    ax[1].axhline(noise**2, color='r', linestyle='--', label='Cutoff Frequency')
+    if show:
+        fig, ax = pl.subplots(nrows=1, ncols=2, figsize=(12, 6))
+
+        tmp = ax[0].imshow(img, cmap='gray')
+        pl.colorbar(tmp, ax=ax[0])
+        ax[0].set_title("Synthesized Image (AAPSD $1/f^2$)")
+        ax[0].axis('off')
+    
+        ax[1].loglog(kk, power)
+        ax[1].loglog(kk, K / (1.0 + (nu/v0)**2)**(beta / 2.0))
+        ax[1].axhline(noise**2, color='r', linestyle='--', label='Cutoff Frequency')
 
     print(f"Mean value of the image: {np.mean(img)} - noisy: {np.mean(im_noise)} - {np.sqrt(power2d[0, 0])}")
-    print(f"Std value of the image: {np.std(img)} - noisy: {np.std(im_noise)}")
+    print(f"Std value of the image: {np.var(img)} - noisy: {np.std(im_noise)}")
 
     KK[i] = K
-    mn[i] = np.std(im_noise)
+    s2[i] = np.var(im_noise)
+    K_from_s2[i] = np.var(img) * (beta - 2.0) / (2.0 * np.pi * v0**2)
+    K_from_s2[i] = np.var(img) * 512**2 / np.sum(sqrt_psd[0:, 0:]**2)
+
+fig, ax = pl.subplots()
+ax.loglog(s2, KK, marker='o')
+ax.loglog(s2, K_from_s2)
+print(KK / K_from_s2)
+# ax.loglog(KK, KK**0.5)
