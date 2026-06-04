@@ -420,11 +420,9 @@ class Deconvolution(object):
                     self.pupil[j] = pupil
                     self.basis[j] = basis
                     self.defocus_basis[j] = defocus_basis
-                    self.rho[j] = rho                    
+                    self.rho[j] = rho
                     self.f_x[j] = f_x
                     self.f_y[j] = f_y
-                    self.x[j] = X
-                    self.y[j] = Y
                     self.diffraction_limit[j] = diffraction_limit
 
         return
@@ -2104,16 +2102,12 @@ class Deconvolution(object):
                     tmp['contrast'] = f'{torch.std(obj_filter[0]) / torch.mean(obj_filter[0]) * 100.0:7.4f}'
                     tmp['minmax'] = f'{torch.min(obj_filter[0]):7.4f}/{torch.max(obj_filter[0]):7.4f}'
                 tmp['chg'] = f'{delta_modes.item():8.6f}'
-                if self.loss_type == 'marginal':
-                    tmp['lr'] = f'{opt.param_groups[0]["lr"]:8.6f}/{opt.param_groups[1]["lr"]:8.6f}'
-                else:
-                    tmp['lr'] = f'{opt.param_groups[0]["lr"]:8.6f}'
-                tmp['LDATA'] = f'{loss_data.detach().item():8.6f}'
-                tmp['LPRIOR'] = f'{loss_prior.detach().item():8.6f}'
-                if self.loss_type == 'marginal':
+                if self.loss_type == 'marginal' and len(opt.param_groups) > 1:
                     tmp['lr'] = f'{opt.param_groups[0]["lr"]:6.3f}/{opt.param_groups[1]["lr"]:6.3f}'
                 else:
                     tmp['lr'] = f'{opt.param_groups[0]["lr"]:6.3f}'
+                tmp['LDATA'] = f'{loss_data.detach().item():8.6f}'
+                tmp['LPRIOR'] = f'{loss_prior.detach().item():8.6f}'
                 if self.loss_type == 'marginal':
                     tmp['K'] = f'{self.pars_s0_out[0][0].item() * self.npix:6.2f}'
                     tmp['v0'] = f'{self.pars_s0_out[0][1].item():6.2f}'
@@ -2134,11 +2128,6 @@ class Deconvolution(object):
                     if n_active > self.stop_psd:
                         if len(opt.param_groups) > 1:
                             opt.param_groups[1]['lr'] = 0.0
-
-                if self.loss_type == 'marginal':
-                    if n_active > self.stop_psd:
-                        opt.param_groups[1]['lr'] = 0.0
-                    # opt.param_groups[2]['lr'] = 0.0
 
                 
             self.tf_convergence = time.time()
@@ -2177,7 +2166,6 @@ class Deconvolution(object):
                 for i in range(self.n_o):
                     obj_filter[i] = torch.fft.ifft2(obj_filter_ft[i]).real
 
-            else:
             else:
                 pars_s0_arg = pars_s0_torch if self.loss_type == 'marginal' else None
                 pars_s2_arg = pars_s2_torch if (self.loss_type == 'marginal' and 'psd' in self.config) else None
