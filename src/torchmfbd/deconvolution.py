@@ -70,11 +70,9 @@ class Deconvolution(object):
         self.cuda = torch.cuda.is_available()      
 
         # Check that the GPU compatible
-        if HAS_NVITOP:
+        if self.cuda and HAS_NVITOP:
             if len(Device.all()) == 0:
                 self.cuda = False  
-        else:
-            self.cuda = False
 
         # Ger handlers to later check memory and usage of GPUs
         if self.cuda:
@@ -85,9 +83,13 @@ class Deconvolution(object):
                 self.device = torch.device("cpu")
             else:
                 self.device = torch.device(f"cuda:{self.config['optimization']['gpu']}")
-                self.handle = Device.all()[self.config['optimization']['gpu']]
-                self.logger.info(f"Computing in {self.handle.name()} (free {self.handle.memory_free() / 1024**3:4.2f} GB) - cuda:{self.config['optimization']['gpu']}")
-                self.initial_memory_used = self.handle.memory_used()
+                if HAS_NVITOP:
+                    self.handle = Device.all()[self.config['optimization']['gpu']]
+                    self.logger.info(f"Computing in {self.handle.name()} (free {self.handle.memory_free() / 1024**3:4.2f} GB) - cuda:{self.config['optimization']['gpu']}")
+                    self.initial_memory_used = self.handle.memory_used()
+                else:
+                    self.handle = None
+                    self.logger.info(f"Computing in cuda:{self.config['optimization']['gpu']} (nvitop not installed, memory tracking disabled)")
         else:
             if not HAS_NVITOP:
                 self.logger.info(f"nvitop not installed. Computing in cpu")
