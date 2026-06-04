@@ -24,9 +24,10 @@ optimization:
     softplus_scale : 1000
     lr_obj : 0.00
     lr_modes : 0.08
-    show_object_info: False
     lr_prior : 0.01
     loss_type: marginal
+    stop_psd_optimization: 5
+    show_object_info: False
 
 regularization:
      iuwt1:
@@ -40,7 +41,7 @@ psf:
     filename: '../basis/nmf_8542_n_150_r0_5_30.npz'
     ngrid_modes: 8
     shift: True
-    jitter: False
+    jitter: none
 
 
 initialization:
@@ -53,13 +54,7 @@ annealing:
     start_pct : 0.1
     end_pct : 0.6
 
-priors:
-    K:
-        mean: 1000
-        sigma: 1.0
-    v0:
-        mean: 0.1
-        sigma: 1.0
-    p:
-        mean: 2.0
-        sigma: 2.0
+psd:
+    K: 250.0
+    v0: 0.1
+    p: 2.0

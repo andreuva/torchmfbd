@@ -34,19 +34,22 @@ def _check_config(config):
         config["optimization"]["softplus_scale"] = 1.0
     
     if "lr_obj" not in config["optimization"]:
-        raise ValueError("lr_obj mandatory")
+        config["optimization"]["lr_obj"] = 0.01
     
     if "lr_modes" not in config["optimization"]:
-        raise ValueError("lr_modes is mandatory")
+        config["optimization"]["lr_modes"] = 0.01
     
     if "lr_prior" not in config["optimization"]:
-        raise ValueError("lr_prior is mandatory")
+        config["optimization"]["lr_prior"] = 0.02
 
     if "jitter" not in config["psf"]:
-        config["psf"]["jitter"] = False
+        config["psf"]["jitter"] = 'none'
         
     if "shift" not in config["psf"]:
         config["psf"]["shift"] = False
+
+    if "remove_tt" not in config["psf"]:
+        config["psf"]["remove_tt"] = False
 
     if config["optimization"]["transform"] not in ["softplus", "none"]:
         raise ValueError(f"Invalid value for transform. It is {config['optimization']['transform']} but should be softplus or none")
@@ -67,10 +70,17 @@ def _check_config(config):
             if "s_u_joint" not in v:
                 v["s_u_joint"] = 100.0
 
+    if "psd" not in config:
+        config["psd"] = {}
+        config["psd"]["K"] = 100.0
+        config["psd"]["v0"] = 0.1
+        config["psd"]["p"] = 2.0
+
+    # Retain priors block fallback if present for backward compatibility
     if "priors" not in config:
         config["priors"] = {}
-        config["priors"]["K"] = {'mean': 1.0, 'sigma': 1.0}
-        config["priors"]["v0"] = {'mean': 0.1, 'sigma': 1.0}
-        config["priors"]["p"] = {'mean': 2.0, 'sigma': 1.0}
+        config["priors"]["K"] = {'mean': config["psd"]["K"], 'sigma': 1.0}
+        config["priors"]["v0"] = {'mean': config["psd"]["v0"], 'sigma': 1.0}
+        config["priors"]["p"] = {'mean': config["psd"]["p"], 'sigma': 1.0}
                                     
     return config

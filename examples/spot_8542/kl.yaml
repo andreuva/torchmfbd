@@ -26,8 +26,9 @@ optimization:
     softplus_scale : 1.0    
     lr_obj : 0.00
     lr_modes : 0.08
-    lr_prior : 0.1
+    lr_prior : 0.08
     loss_type: marginal
+    stop_psd_optimization: 5
     show_object_info: False
 
 regularization:
@@ -39,7 +40,7 @@ regularization:
 psf:
     model : kl
     nmax_modes : 54
-    jitter : False
+    jitter : none
 
 initialization:
     object : contrast
@@ -50,13 +51,7 @@ annealing:
     start_pct : 0.1
     end_pct : 0.6
 
-priors:
-    K:
-        mean: 1000
-        sigma: 1.0
-    v0:
-        mean: 0.1
-        sigma: 1.0
-    p:
-        mean: 2.0
-        sigma: 2.0
+psd:
+    K: 250.0
+    v0: 0.1
+    p: 2.0
