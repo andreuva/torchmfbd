@@ -1616,14 +1616,73 @@ class Deconvolution(object):
                         modes = modes.clone().detach().to(self.device).requires_grad_(True)
                 
                 if self.psf_model.lower() == 'nmf':                               
-                    # Centering the diffraction PSF to match the NMF basis spatial layout
-                    psf_diff_centered = torch.fft.fftshift(self.psf_diffraction[0], dim=[-2, -1])
-                    tmp, _ = optim.nnls(self.basis[0].reshape((self.n_modes, self.npix**2)).T.cpu().numpy(), psf_diff_centered.flatten().cpu().numpy())
+                    init_mode = self.config.get('initialization', {}).get('modes', 'diffraction')
+                    if init_mode == 'cross_spectrum_nnls':
+                        self.logger.info("Initializing NMF modes using Cross-Spectrum NNLS...")
+                        
+                        # Use precomputed uncentered diffraction OTF as baseline reference
+                        otf_ref = self.psf_diffraction_ft[0]
+                        
+                        # Initialize target arrays for the coefficients (shape: n_seq, n_f, n_modes)
+                        basis_flat = self.basis[0].reshape((self.n_modes, self.npix**2)) # (n_modes, npix**2)
+                        
+                        # Collect all target PSFs into a single tensor
+                        target_psfs = torch.zeros((n_seq, self.n_f, self.npix, self.npix), device=self.device)
+                        
+                        # Process per sequence batch and frame to get target PSFs
+                        for i_s in range(n_seq):
+                            frames_seq = frames_apodized_seq[0][i_s]  # (n_f, npix, npix)
+                            frames_ft_seq = torch.fft.fft2(frames_seq, norm=self.fft_norm)  # (n_f, npix, npix)
+                            mean_frame_ft = torch.mean(frames_ft_seq, dim=0)  # (npix, npix)
+                            
+                            # Stabilized division denominator
+                            den = torch.conj(mean_frame_ft) * mean_frame_ft
+                            mean_den = torch.mean(den).real
+                            epsilon = 1e-4 * mean_den + 1e-12
+                            
+                            for i_f in range(self.n_f):
+                                # Ratio of frame OTF to mean frame OTF
+                                ratio = (frames_ft_seq[i_f] * torch.conj(mean_frame_ft)) / (den + epsilon)
+                                target_otf = ratio * otf_ref
+                                target_psf = torch.fft.ifft2(target_otf, norm=self.fft_norm).real
+                                target_psfs[i_s, i_f, :, :] = torch.fft.fftshift(target_psf, dim=[-2, -1])
+                        
+                        # Flatten targets to shape (n_seq * n_f, npix**2)
+                        Y = target_psfs.reshape((n_seq * self.n_f, self.npix**2))
+                        
+                        # Precompute quadratic terms for batched NNLS
+                        # H = A * A^T (n_modes, n_modes)
+                        H = torch.matmul(basis_flat, basis_flat.t())
+                        # G = Y * A^T (n_seq * n_f, n_modes)
+                        G = torch.matmul(Y, basis_flat.t())
+                        
+                        # Compute Lipschitz constant (largest eigenvalue of H) for optimal step size
+                        L = torch.linalg.eigvalsh(H)[-1].item()
+                        step = 1.0 / L
+                        
+                        # Batched Accelerated Projected Gradient (APG) for NNLS
+                        X = torch.zeros((n_seq * self.n_f, self.n_modes), device=self.device)
+                        Y_apg = X.clone()
+                        t_apg = 1.0
+                        for _ in range(80):
+                            # Gradient step & non-negative projection
+                            X_next = torch.clamp(Y_apg - step * (torch.matmul(Y_apg, H) - G), min=0.0)
+                            t_next = 0.5 * (1.0 + np.sqrt(1.0 + 4.0 * t_apg**2))
+                            Y_apg = X_next + ((t_apg - 1.0) / t_next) * (X_next - X)
+                            X = X_next
+                            t_apg = t_next
+                            
+                        tmp_torch = X.reshape((n_seq, self.n_f, self.n_modes))
+                    else:
+                        # Centering the diffraction PSF to match the NMF basis spatial layout
+                        self.logger.info("Initializing NMF modes using Diffraction PSF NNLS fit...")
+                        psf_diff_centered = torch.fft.fftshift(self.psf_diffraction[0], dim=[-2, -1])
+                        tmp, _ = optim.nnls(self.basis[0].reshape((self.n_modes, self.npix**2)).T.cpu().numpy(), psf_diff_centered.flatten().cpu().numpy())
+                        tmp_torch = torch.tensor(tmp.astype('float32'))[None, None, :].repeat((n_seq, self.n_f, 1))
                     
                     # Convert physical NNLS coefficients to optimization variables
                     # account for softplus_scale: x = inv_softplus(tmp * scale) / scale
                     scale = self.config['optimization'].get('softplus_scale', 1.0)
-                    tmp_torch = torch.tensor(tmp.astype('float32'))
                     
                     # Safe inverse softplus: for large values x ~= y, for small values use the log formula
                     threshold = 20.0
@@ -1631,8 +1690,7 @@ class Deconvolution(object):
                                           tmp_torch, 
                                           torch.log(torch.exp(tmp_torch * scale) - 1.0 + 1e-10) / scale)
                     
-                    modes = modes_val[None, None, :].repeat((n_seq, self.n_f, 1))
-                    modes = modes.clone().detach().to(self.device).requires_grad_(True)
+                    modes = modes_val.clone().detach().to(self.device).requires_grad_(True)
                     
                     # Initialize learnable PSF shift (one per sequence, in pixels) if enabled in config
                     if self.config['psf']['shift']:

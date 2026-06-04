@@ -2,7 +2,25 @@ import numpy as np
 import torchmfbd.zern as zern
 import matplotlib.pyplot as pl
 from tqdm import tqdm
-from dict_hash import sha256
+import hashlib
+import json
+try:
+    from dict_hash import sha256
+except ImportError:
+    def sha256(d):
+        def stable_repr(obj):
+            if isinstance(obj, dict):
+                return {k: stable_repr(v) for k, v in sorted(obj.items())}
+            elif isinstance(obj, list):
+                return [stable_repr(x) for x in obj]
+            elif isinstance(obj, np.ndarray):
+                return obj.tolist()
+            return obj
+        try:
+            serialized = json.dumps(stable_repr(d), sort_keys=True)
+            return hashlib.sha256(serialized.encode('utf-8')).hexdigest()
+        except Exception:
+            return hashlib.sha256(str(stable_repr(d)).encode('utf-8')).hexdigest()
 import glob
 import pathlib
 import logging

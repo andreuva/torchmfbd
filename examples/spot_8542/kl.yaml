@@ -24,10 +24,11 @@ optimization:
     gpu : 0
     transform : softplus
     softplus_scale : 1.0    
-    lr_obj : 0.02
+    lr_obj : 0.00
     lr_modes : 0.08
     lr_prior : 0.1
     loss_type: marginal
+    show_object_info: False
 
 regularization:
      iuwt1:

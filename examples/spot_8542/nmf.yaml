@@ -5,7 +5,7 @@ telescope:
 images:
     n_pixel : 64    
     pix_size : 0.059
-    apodization_border : 6
+    apodization_border : 10
     remove_gradient_apodization : True
 
 object1:
@@ -25,8 +25,8 @@ optimization:
     lr_obj : 0.00
     lr_modes : 0.08
     show_object_info: False
-    lr_prior : 0.00
-    loss_type: joint
+    lr_prior : 0.01
+    loss_type: marginal
 
 regularization:
      iuwt1:
@@ -40,17 +40,18 @@ psf:
     filename: '../basis/nmf_8542_n_150_r0_5_30.npz'
     ngrid_modes: 8
     shift: True
-    jitter: True
+    jitter: False
 
 
 initialization:
     object : contrast
+    # modes : cross_spectrum_nnls
     modes_std : 0.0
 
 annealing:
-    type: linear
-    start_pct : 0.0
-    end_pct : 0.85
+    type: none
+    start_pct : 0.1
+    end_pct : 0.6
 
 priors:
     K:
