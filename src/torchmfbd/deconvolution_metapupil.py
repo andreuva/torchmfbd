@@ -10,7 +10,11 @@ from collections import OrderedDict
 from tqdm import tqdm
 from skimage.morphology import flood
 import scipy.ndimage as nd
-from nvitop import Device
+try:
+    from nvitop import Device
+    HAS_NVITOP = True
+except ImportError:
+    HAS_NVITOP = False
 from torchmfbd.deconvolution import Deconvolution
 import logging
 import torchmfbd.kl_modes as kl_modes

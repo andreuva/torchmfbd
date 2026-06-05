@@ -1,13 +1,16 @@
+import sys
+from unittest.mock import MagicMock
+sys.modules['nvitop'] = MagicMock()
+sys.modules['dict_hash'] = MagicMock()
 import numpy as np
 import os
 import h5py
 import torch
 import matplotlib.pyplot as pl
-import sys
+sys.path.append('../../src')
 sys.path.append('../')
 from readsst import readsst
 import torchmfbd
-import psf_tools
 
 
 if __name__ == '__main__':
@@ -16,12 +19,11 @@ if __name__ == '__main__':
     lam = 7
     npixx = 256
     npixy = 512
-    obs_file = f"spot_20200727_083509_8542_npix512_original.h5"
+    obs_file = "spot_20200727_083509_8542_npix512_destretched.h5"
 
     print(f'Reading observations from {obs_file}...')
-    f = h5py.File(obs_file, 'r')
-    im = f['im'][:]    
-    f.close()
+    with h5py.File(obs_file, 'r') as f:
+        im = f['im'][:]    
     
     frames = im[:, :, :, 0:npixx, 0:npixy]
 
@@ -41,9 +43,9 @@ if __name__ == '__main__':
         decSI.add_frames(frames_patches, id_object=i, id_diversity=0, diversity=0.0)
                 
     decSI.deconvolve(infer_object=False, 
-                     optimizer='lbfgs', 
+                     optimizer='adam', 
                      simultaneous_sequences=90,
-                     n_iterations=10)
+                     n_iterations=350)
             
     obj = []
     for i in range(2):
@@ -75,7 +77,3 @@ if __name__ == '__main__':
     ax[0, 1].set_title('Reconstructed object')
     ax[0, 2].set_title('Reconstructed object (updated cutoffs)')
     pl.savefig('spot_8542_nmf_patches.png', dpi=300, bbox_inches='tight')
-
-    # Export and plot PSFs for comparison
-    psfs = psf_tools.export_psfs(decSI)
-    psf_tools.plot_psfs(psfs, model_name='NMF')

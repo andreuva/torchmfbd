@@ -11,6 +11,8 @@ __pycache__/
 *.fts
 *.h5
 *.fits
+*.png
+*.gif
 *.pdf
 
 # Distribution / packaging

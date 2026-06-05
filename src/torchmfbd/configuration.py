@@ -44,7 +44,10 @@ def _check_config(config):
 
     if "jitter" not in config["psf"]:
         config["psf"]["jitter"] = 'none'
-    
+        
+    if "shift" not in config["psf"]:
+        config["psf"]["shift"] = False
+
     if "remove_tt" not in config["psf"]:
         config["psf"]["remove_tt"] = False
 
@@ -72,5 +75,11 @@ def _check_config(config):
         config["psd"]["K"] = 100.0
         config["psd"]["v0"] = 0.1
         config["psd"]["p"] = 2.0
+    # Retain priors block fallback if present for backward compatibility
+    if "priors" not in config:
+        config["priors"] = {}
+        config["priors"]["K"] = {'mean': config["psd"]["K"], 'sigma': 1.0}
+        config["priors"]["v0"] = {'mean': config["psd"]["v0"], 'sigma': 1.0}
+        config["priors"]["p"] = {'mean': config["psd"]["p"], 'sigma': 1.0}
                                     
     return config

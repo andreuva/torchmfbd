@@ -7,7 +7,11 @@ from collections import OrderedDict
 from tqdm import tqdm
 from skimage.morphology import flood
 import scipy.ndimage as nd
-from nvitop import Device
+try:
+    from nvitop import Device
+    HAS_NVITOP = True
+except ImportError:
+    HAS_NVITOP = False
 import logging
 import torchmfbd.kl_modes as kl_modes
 import torchmfbd.noise as noise
@@ -66,8 +70,9 @@ class Deconvolution(object):
         self.cuda = torch.cuda.is_available()      
 
         # Check that the GPU compatible
-        if len(Device.all()) == 0:
-            self.cuda = False  
+        if self.cuda and HAS_NVITOP:
+            if len(Device.all()) == 0:
+                self.cuda = False  
 
         # Ger handlers to later check memory and usage of GPUs
         if self.cuda:
@@ -78,11 +83,18 @@ class Deconvolution(object):
                 self.device = torch.device("cpu")
             else:
                 self.device = torch.device(f"cuda:{self.config['optimization']['gpu']}")
-                self.handle = Device.all()[self.config['optimization']['gpu']]
-                self.logger.info(f"Computing in {self.handle.name()} (free {self.handle.memory_free() / 1024**3:4.2f} GB) - cuda:{self.config['optimization']['gpu']}")
-                self.initial_memory_used = self.handle.memory_used()
+                if HAS_NVITOP:
+                    self.handle = Device.all()[self.config['optimization']['gpu']]
+                    self.logger.info(f"Computing in {self.handle.name()} (free {self.handle.memory_free() / 1024**3:4.2f} GB) - cuda:{self.config['optimization']['gpu']}")
+                    self.initial_memory_used = self.handle.memory_used()
+                else:
+                    self.handle = None
+                    self.logger.info(f"Computing in cuda:{self.config['optimization']['gpu']} (nvitop not installed, memory tracking disabled)")
         else:
-            self.logger.info(f"No GPU is available. Computing in cpu")
+            if not HAS_NVITOP:
+                self.logger.info(f"nvitop not installed. Computing in cpu")
+            else:
+                self.logger.info(f"No GPU is available. Computing in cpu")
             self.device = torch.device("cpu")
             self.handle = None
 
@@ -123,7 +135,7 @@ class Deconvolution(object):
         self.lr_modes = self.config['optimization']['lr_modes']
         self.lr_prior = self.config['optimization']['lr_prior']
         if self.loss_type == 'marginal':
-            self.stop_psd = self.config['optimization']['stop_psd_optimization']
+            self.stop_psd = self.config['optimization'].get('stop_psd_optimization', 1000)
 
         # Type of Fourier filter for the loss
         if 'filter_loss' in self.config['optimization']:
@@ -352,6 +364,17 @@ class Deconvolution(object):
                 if (self.psf_model.lower() in ['zernike', 'kl']):
                     basis /= normalized_wavelengths[i]
                     defocus_basis /= normalized_wavelengths[i]
+                elif self.psf_model.lower() == 'nmf':
+                    # Read the exponent from the YAML config (defaults to 1.0)
+                    basis_power = self.config['psf'].get('basis_power', 1.0)
+                    
+                    if basis_power != 1.0:
+                        self.logger.info(f"  * Applying 'fat wing' power: {basis_power}")
+                        # Apply power (with epsilon to prevent numerical issues at exactly zero)
+                        basis = torch.pow(basis + 1e-12, basis_power)
+                    
+                    # Normalize each NMF basis function to have unit area
+                    basis = basis / (torch.sum(basis, dim=[-1, -2], keepdim=True) + 1e-12)
 
                 if (self.add_piston):
                     self.logger.info(f"Adding piston mode...")
@@ -374,7 +397,7 @@ class Deconvolution(object):
 
             # Fourier coordinates for jitter OTF given in pixel
             f = np.fft.fftfreq(self.npix)
-            f_x, f_y = np.meshgrid(freq, freq)
+            f_x, f_y = np.meshgrid(f, f)
             f_x = torch.tensor(f_x.astype('float32')).to(self.device)
             f_y = torch.tensor(f_y.astype('float32')).to(self.device)
 
@@ -399,9 +422,9 @@ class Deconvolution(object):
                     self.pupil[j] = pupil
                     self.basis[j] = basis
                     self.defocus_basis[j] = defocus_basis
-                    self.rho[j] = rho                    
-                    self.f_x[j] = f_x * cutoff
-                    self.f_y[j] = f_y * cutoff
+                    self.rho[j] = rho
+                    self.f_x[j] = f_x
+                    self.f_y[j] = f_y
                     self.diffraction_limit[j] = diffraction_limit
 
         return
@@ -771,7 +794,7 @@ class Deconvolution(object):
                 
         return psf_norm, otf
     
-    def compute_psfs_nmf(self, modes):
+    def compute_psfs_nmf(self, modes, shift_x=None, shift_y=None):
         """
         Compute the Point Spread Functions (PSFs) from the given modes.
         Parameters:
@@ -788,18 +811,37 @@ class Deconvolution(object):
         psf_norm = [None] * self.n_o
         otf = [None] * self.n_o
         
+        # Enforce non-negativity of NMF coefficients with scale from config
+        scale = self.config['optimization'].get('softplus_scale', 1.0)
+        modes_nn = F.softplus(modes * scale) / scale
+
         for i in range(self.n_o):
 
             # Compute PSF from estimated modes                
-            psf = torch.einsum('ijk,klm->ijlm', modes, self.basis[i][0:n_active, :, :])
+            psf = torch.einsum('ijk,klm->ijlm', modes_nn, self.basis[i][0:n_active, :, :])
 
             psf = torch.fft.fftshift(psf, dim=[-2, -1])
                         
-            # Normalize PSF        
-            psf_norm[i] = psf / torch.sum(psf, [-1, -2], keepdim=True)
+            # Normalize PSF (with epsilon to avoid division by zero)        
+            psf_norm[i] = psf / (torch.sum(psf, [-1, -2], keepdim=True) + 1e-12)
 
             # FFT of the PSF
             otf[i] = torch.fft.fft2(psf_norm[i], norm=self.fft_norm)
+
+            # Apply Fourier-domain shift (tip-tilt substitute for NMF)
+            # shift_x, shift_y are in pixels; shape: (n_seq,)
+            sx = shift_x if shift_x is not None else (self.shift_x if self.config['psf']['shift'] else None)
+            sy = shift_y if shift_y is not None else (self.shift_y if self.config['psf']['shift'] else None)
+            if sx is not None and sy is not None:
+                freq_x = torch.fft.fftfreq(self.npix, device=self.device)  # (W,)
+                freq_y = torch.fft.fftfreq(self.npix, device=self.device)  # (H,)
+                fy, fx = torch.meshgrid(freq_y, freq_x, indexing='ij')     # (H, W)
+                # shift: (n_seq, n_f, 1, 1) for broadcasting over (n_seq, n_f, H, W)
+                phase = (-2j * torch.pi * (
+                    sx[:, :, None, None] * fx[None, None, :, :] +
+                    sy[:, :, None, None] * fy[None, None, :, :]
+                ))
+                otf[i] = otf[i] * torch.exp(phase)
         
         return psf_norm, otf
     
@@ -822,7 +864,7 @@ class Deconvolution(object):
             psf = (torch.conj(ft) * ft).real
             
             # Normalize PSF        
-            psf_norm[i] = psf / torch.sum(psf)
+            psf_norm[i] = psf / torch.sum(psf, dim=(-1, -2), keepdim=True)
 
             # FFT of the PSF
             otf[i] = torch.fft.fft2(psf_norm[i], norm=self.fft_norm)
@@ -845,16 +887,23 @@ class Deconvolution(object):
         """
         den = torch.conj(Sconj_I) * Sconj_I
         H = (Sconj_S / den).real        
-
-        H = torch.fft.fftshift(H).detach().cpu().numpy()
+        H = torch.fft.fftshift(H, dim=(-2, -1)).detach().cpu().numpy()
         
         # noise = 1.35 / np.median(H[:, :, 0:10, 0:10], axis=(2,3))
 
         H = nd.median_filter(H, [1,3,3], mode='wrap')    
 
-        # sigma_1 = torch.mean(sigma, axis=-1)[:, None, None].cpu().numpy()
+        if hasattr(sigma, 'dim') and sigma.dim() > 0:
+            if sigma.dim() == 1:
+                sigma_1 = sigma[:, None, None].cpu().numpy()
+            elif sigma.dim() == 2:
+                sigma_1 = sigma[:, :, None].cpu().numpy()
+            else:
+                sigma_1 = torch.mean(sigma, axis=-1)[:, None, None].cpu().numpy()
+        else:
+            sigma_1 = sigma.cpu().numpy()
         
-        filt = 1.0 - H * sigma.cpu().numpy()
+        filt = 1.0 - H * sigma_1
         filt[filt < 0.2] = 0.0
         filt[filt > 1.0] = 1.0
                 
@@ -874,7 +923,7 @@ class Deconvolution(object):
         Parameters:
         -----------
         pars_s0 : torch.Tensor
-            A tensor of shape (batch_size, n_o, 4) containing the parameters for the s0 function.
+            A tensor containing the parameters for the s0 function.
         i : int
             The index of the object for which to compute s_u.
         Returns:
@@ -884,31 +933,45 @@ class Deconvolution(object):
             - v0 (torch.Tensor): The transformed v0 parameter.
             - p (torch.Tensor): The transformed p parameter.
         """
-        # K = torch.exp(2*F.sigmoid(pars_s0[:,  0]))[:, None, None]
-        # v0 = torch.exp(5.0*F.logsigmoid(pars_s0[:, 1]/2))[:, None, None]
-        # p = torch.exp(1.6*F.sigmoid(pars_s0[:, 2]))[:, None, None]
-
         if self.loss_type == 'marginal':
-            K = torch.exp(pars_s0[obj, 0])            
-            v0 = torch.exp(pars_s0[obj, 1])
-            p = torch.exp(pars_s0[obj, 2])
+            if pars_s2 is not None:
+                # Upstream format: pars_s0 shape (n_o, 3), pars_s2 shape (n_o, 1)
+                K = torch.exp(pars_s0[obj, 0])            
+                v0 = torch.exp(pars_s0[obj, 1])
+                p = torch.exp(pars_s0[obj, 2])
 
-            v = self.rho[obj]
+                v = self.rho[obj]
 
-            # Evaluate the s_u function on the frequency grid. We use the mean of the frames in Fourier space to set the scale of s_u at frequency 0,0
-            s_u = K * self.npix / (1.0 + (v/v0)**2)**(4.0/2.0)
-            
-            # The DC component of the Fourier transform of the image is equal to sqrt(nx*ny)*mean if norm='ortho'
-            # As a consequence, the variance of the noise at frequency (0,0) is given by s_u[0,0] = mean**2 * nx * ny
-            s_u[0, 0] = frames_mean[0]**2 * self.npix * self.npix
-            
-            # s2 = torch.mean(sigma[obj]**2, dim=1)
-            s2 = torch.exp(pars_s2[obj, 0])
+                # Evaluate the s_u function on the frequency grid.
+                # We use the mean of the frames in Fourier space to set the scale of s_u at frequency 0,0
+                s_u = K * self.npix / (1.0 + (v/v0)**2)**(4.0/2.0)
+                
+                # The DC component of the Fourier transform of the image is equal to sqrt(nx*ny)*mean if norm='ortho'
+                # As a consequence, the variance of the noise at frequency (0,0) is given by s_u[0,0] = mean**2 * nx * ny
+                s_u[0, 0] = frames_mean[0]**2 * self.npix * self.npix
+                
+                s2 = torch.exp(pars_s2[obj, 0])
+            else:
+                # Local format fallback: pars_s0 shape (batch_size, n_o, 4)
+                K = torch.exp(pars_s0[:, obj, 0])[:, None, None]
+                v0 = torch.exp(pars_s0[:, obj, 1])[:, None, None]            
+                p = torch.exp(pars_s0[:, obj, 2])[:, None, None]
+
+                v = self.rho[obj][None, :, :]
+
+                s_u = K / (1.0 + (v/v0)**2)**(p/2.0)
+
+                s_u[:, 0, 0] = frames_mean**2 * self.npix * self.npix
+                
+                s2 = torch.exp(pars_s0[:, obj, 3])
         else:
             K, v0, p = None, None, None
             s_u = self.s_u[obj] * torch.ones_like(self.rho[obj]).to(self.device)
-            s2 = torch.mean(sigma[obj]**2) #* 10
-            
+            if hasattr(sigma[obj], 'dim') and sigma[obj].dim() == 3:
+                s2 = torch.mean(sigma[obj]**2, dim=1)
+            else:
+                s2 = torch.mean(sigma[obj]**2)
+        
         return s_u, s2, K, v0, p
 
     def compute_object(self, images_ft, otf, sigma, plane, type_filter='tophat', pars_s0=None, pars_s2=None):
@@ -932,35 +995,33 @@ class Deconvolution(object):
         out_filter = [None] * self.n_o
         
         for i in range(self.n_o):
-                        
-            # Sconj_S = torch.sum(sigma[i][:, :, None, None] * torch.conj(otf[i]) * otf[i], dim=1)
-            # Sconj_I = torch.sum(sigma[i][:, :, None, None] * torch.conj(otf[i]) * images_ft[i], dim=1)
-
-            # We assume, for the moment, that the noise is the same for all frames
-            Sconj_S = torch.sum(torch.conj(otf[i]) * otf[i], dim=1)
-            Sconj_I = torch.sum(torch.conj(otf[i]) * images_ft[i], dim=1)
+            # Per-frame noise weighting: γ_kj = mean(σ²) / σ² 
+            # We use dimensionless weights to maintain consistency with s2/s_u
+            s2_local = torch.mean(sigma[i]**2, dim=1)
+            gamma = s2_local[:, None, None, None] / (sigma[i][:, :, None, None] ** 2 + 1e-10)
+            Sconj_S = torch.sum(gamma * torch.conj(otf[i]) * otf[i], dim=1)
+            Sconj_I = torch.sum(gamma * torch.conj(otf[i]) * images_ft[i], dim=1)
 
             frames_mean = torch.mean(images_ft[i][:, :, 0, 0], dim=1).real
 
             s_u, s2, K, v0, p = self.get_su_s2(obj=i, sigma=sigma, pars_s0=pars_s0, pars_s2=pars_s2, frames_mean=frames_mean)
+            if pars_s2 is not None:
+                s2_term = s2
+                s2_filt = s2
+            else:
+                s2_term = s2[:, None, None] if hasattr(s2, 'dim') and s2.dim() > 0 else s2
+                s2_filt = s2[:, None] if hasattr(s2, 'dim') and s2.dim() > 0 else s2
 
-            # s2 = torch.mean(sigma[i]**2, dim=1)
             # Use Lofdahl & Scharmer (1994) filter
             if (self.image_filter[i] == 'scharmer'):
-
-                ######### WHAT SHOULD WE CHOOSE FOR COMPUTING THE FILTER??            
-                # mask = self.lofdahl_scharmer_filter(Sconj_S + s2[:, None, None] / s_u, Sconj_I, s2[:, None].detach()) * self.mask_diffraction_th[i][None, :, :]
-                # out_ft[i] = Sconj_I / (Sconj_S + s2[:, None, None] / s_u)
-
-                mask = self.lofdahl_scharmer_filter(Sconj_S, Sconj_I, s2.detach()) * self.mask_diffraction_th[i][None, :, :]
+                mask = self.lofdahl_scharmer_filter(Sconj_S, Sconj_I, s2_filt.detach()) * self.mask_diffraction_th[i][None, :, :]
                 out_ft[i] = Sconj_I / (Sconj_S + 1e-10)
                             
                 out_filter_ft[i] = out_ft[i] * mask
             
             # Use simple Wiener filter with tophat prior            
             if (self.image_filter[i] == 'tophat'):
-                                                
-                out_ft[i] = Sconj_I / (Sconj_S + s2[:, None, None] / s_u)
+                out_ft[i] = Sconj_I / (Sconj_S + s2_term / s_u)
                 
                 out_filter_ft[i] = out_ft[i] * self.mask_diffraction_th[i][None, :, :]
 
@@ -972,7 +1033,7 @@ class Deconvolution(object):
         
         return out_ft, out_filter_ft, out_filter
     
-    def compute_loss(self, frames_ft, otf, sigma, type_filter='tophat', pars_s0=None, pars_s2=None, jitter=None):        
+    def compute_loss(self, frames_ft, otf, sigma, type_filter='tophat', pars_s0=None, pars_s2=None, jitter=None):
         """
         Compute the object in Fourier space using the specified filter.
         Parameters:
@@ -1006,22 +1067,28 @@ class Deconvolution(object):
 
                 frames_mean = torch.mean(frames_ft[i][:, :, 0, 0], dim=1).real
 
-                s_u, s2, K, v0, p = self.get_su_s2(obj=i, 
-                                                   sigma=sigma, 
-                                                   pars_s0=pars_s0, 
-                                                   pars_s2=pars_s2, 
-                                                   frames_mean=frames_mean)
-                                                
+                s_u, s2, K, v0, p = self.get_su_s2(obj=i, sigma=sigma, pars_s0=pars_s0, pars_s2=pars_s2, frames_mean=frames_mean)
+                                
+                # The value of s_u in the case of the joint estimation should be
+                # selected by hand to give good results
+                # sigma**2/s_u should be the ration between noise and estimated object power spectrum
+                # s2 = torch.mean(sigma[i]**2, dim=1) * 10
+                
                 # m_prior = torch.mean(frames_ft[i],dim=1,keepdims=True)
                 # du = frames_ft[i] - m_prior * otf[i]
                 
                 du = frames_ft[i]
-                hu2 = s2 + s_u * torch.sum(otf[i] * torch.conj(otf[i]), dim=1)
+                if pars_s2 is not None:
+                    s2_term = s2
+                else:
+                    s2_term = s2[:, None, None] if hasattr(s2, 'dim') and s2.dim() > 0 else s2
+
+                hu2 = s2_term + s_u * torch.sum(otf[i] * torch.conj(otf[i]), dim=1)
                 du2 = torch.sum(du * torch.conj(du), dim=1)
                 hu_du = torch.sum(du * torch.conj(otf[i]), dim=1)
                 hu_du2 = s_u * hu_du * torch.conj(hu_du)
                                 
-                loss_data = 0.5 * (du2 - hu_du2 / hu2) / s2
+                loss_data = 0.5 * (du2 - hu_du2 / hu2) / s2_term
 
                 loss_data *= self.mask_diffraction_th[i][None, :, :]
                 
@@ -1029,34 +1096,46 @@ class Deconvolution(object):
                 # # need to add the effect of the marginalized object and also add 
                 # a prior on the parameters of s_u and on s2 to keep them in a reasonable range
                 if self.loss_type == 'marginal':
-                    
-                    self.pars_s0_out[i, 0] = K.detach()
-                    self.pars_s0_out[i, 1] = v0.detach()
-                    self.pars_s0_out[i, 2] = p.detach()
-                    self.pars_s2_out[i, 0] = s2.detach()
-                    
-                    # Prior loss consequence of the marginalization of the object in the joing loss
-                    # plus the term depending on the noise variance                    
-                    loss_prior_marginal = 0.5 * torch.log(hu2) + 0.5 * (self.n_f - 1.0) * torch.log(s2)
+                    if pars_s2 is not None:
+                        self.pars_s0_avg = [K.detach(), v0.detach(), p.detach(), s2.detach()]
+                        self.pars_s0_out[i, 0] = K.detach()
+                        self.pars_s0_out[i, 1] = v0.detach()
+                        self.pars_s0_out[i, 2] = p.detach()
+                        self.pars_s2_out[i, 0] = s2.detach()
+                        
+                        # Prior loss consequence of the marginalization of the object in the joing loss
+                        # plus the term depending on the noise variance
+                        loss_prior_marginal = 0.5 * torch.log(hu2) + 0.5 * (self.n_f - 1.0) * torch.log(s2)
+                        loss_prior = loss_prior_marginal
+                    else:
+                        self.pars_s0_avg = [torch.mean(K).detach(), torch.mean(v0).detach(), torch.mean(p).detach(), torch.mean(s2).detach()]
+                        self.pars_s0_out[:, i, 0] = K[:, 0, 0].detach()
+                        self.pars_s0_out[:, i, 1] = v0[:, 0, 0].detach()
+                        self.pars_s0_out[:, i, 2] = p[:, 0, 0].detach()
+                        self.pars_s0_out[:, i, 3] = s2.detach()
+                        
+                        # Prior loss consequence of the marginalization of the object in the joing loss
+                        # plus the term depending on the noise variance
+                        loss_prior_marginal = 0.5 * torch.log(hu2) + 0.5 * (self.n_f - 1.0) * torch.log(s2[:, None, None])
 
-                    # Prior loss on sigma**2 to avoid zero division and to keep it in a reasonable range
-                    # We use a Gaussian prior on log(sigma**2) with mean given by the average of sigma**2 
-                    # and a sufficiently large variance to avoid constraining it too much
-                    # sig2 = torch.mean(sigma[i]**2, dim=1)[:, None, None]
-                    # loss_prior_s2 = (torch.log(s2[:, None, None]) - torch.log(sig2))**2
+                        # Prior loss on sigma**2 to avoid zero division and to keep it in a reasonable range
+                        # We use a Gaussian prior on log(sigma**2) with mean given by the average of sigma**2 
+                        # and a sufficiently large variance to avoid constraining it too much
+                        sig2 = torch.mean(sigma[i]**2, dim=1)[:, None, None]
+                        loss_prior_s2 = (torch.log(s2[:, None, None]) - torch.log(sig2))**2
 
-                    # Prior loss on K, v0 and p to keep them in a reasonable range
+                        # Prior loss on K, v0 and p to keep them in a reasonable range
 
-                    # Gaussian prior on log(K) with mean (peak power spectrum for normalized images) and variance 1.0
-                    # loss_prior_K = 0.5 * (torch.log10(K) - np.log10(self.K_prior[0]))**2 / self.K_prior[1]**2 + torch.log10(K)
-                    
-                    # Gaussian prior on log(v0) with mean log(0.1) (cutoff frequency for the power spectrum) and variance 1.0
-                    # loss_prior_v0 = 0.5 * (torch.log10(v0) - np.log10(self.v0_prior[0]))**2 / self.v0_prior[1]**2 + torch.log10(v0)
+                        # Gaussian prior on log(K) with mean (peak power spectrum for normalized images) and variance 1.0
+                        loss_prior_K = 0.5 * (torch.log10(K) - np.log10(self.K_prior[0]))**2 / self.K_prior[1]**2 + torch.log10(K)
+                        
+                        # Gaussian prior on log(v0) with mean log(0.1) (cutoff frequency for the power spectrum) and variance 1.0
+                        loss_prior_v0 = 0.5 * (torch.log10(v0) - np.log10(self.v0_prior[0]))**2 / self.v0_prior[1]**2
+                        
+                        # Gaussian prior on log(p) with mean log(2.0) (power law index for the power spectrum) and variance 1.0
+                        loss_prior_p = 0.5 * (p - self.p_prior[0])**2 / self.p_prior[1]**2
 
-                    # Gaussian prior on log(p) with mean log(2.0) (power law index for the power spectrum) and variance 1.0
-                    # loss_prior_p = 0.5 * (p - self.p_prior[0])**2 / self.p_prior[1]**2
-                    
-                    loss_prior = loss_prior_marginal #+ loss_prior_p# + loss_prior_v0 #+ loss_prior_s2 + loss_prior_K +  + loss_prior_v0
+                        loss_prior = loss_prior_marginal + loss_prior_K + loss_prior_p + loss_prior_v0 + loss_prior_s2
                     
                     loss_prior *= self.mask_diffraction_th[i][None, :, :]
 
@@ -1084,7 +1163,7 @@ class Deconvolution(object):
                     Sconj_S = torch.sum(torch.conj(otf[i]) * otf[i], dim=1)
                     Sconj_I = torch.sum(torch.conj(otf[i]) * frames_ft[i], dim=1)
 
-                    mask = self.lofdahl_scharmer_filter(Sconj_S, Sconj_I, sigma[i]) * self.mask_diffraction_th[i][None, :, :]
+                    mask = self.lofdahl_scharmer_filter(Sconj_S, Sconj_I, sigma[i]**2) * self.mask_diffraction_th[i][None, :, :]
                                 
                     loss_data *= mask
                     loss_prior = torch.tensor(0.0).to(self.device)
@@ -1211,8 +1290,6 @@ class Deconvolution(object):
         self.sigma = []
         self.diversity = []
 
-        if XY is not None:
-            self.XY = XY
 
     def combine_frames(self):
         """
@@ -1339,7 +1416,7 @@ class Deconvolution(object):
             for i in range(self.n_o):
                 frames_apodized_seq.append(self.frames_apodized[i][seq, ...].to(self.device))
                 plane_seq.append(self.plane[i][seq, ...].to(self.device))
-                frames_ft.append(torch.fft.fft2(self.frames_apodized[i][seq, ...], norm=self.fft_norm).to(self.device))
+                frames_ft.append(self.frames_ft[i][seq, ...].to(self.device))
                 sigma_seq.append(self.sigma[i][seq, ...].to(self.device))
                 diversity_seq.append(self.diversity[i][seq, ...].to(self.device))
                 
@@ -1349,7 +1426,8 @@ class Deconvolution(object):
                 psf, otf = self.compute_psfs(self.modes_seq[i_seq], diversity_seq, jitter=self.jitter_seq[i_seq] if self.use_jitter != 'none' else None)
             
             if self.psf_model.lower() == 'nmf':
-                psf, otf = self.compute_psfs_nmf(self.modes_seq[i_seq])
+                sx, sy = self.shift_seq[i_seq] if self.shift_seq[i_seq] is not None else (None, None)
+                psf, otf = self.compute_psfs_nmf(self.modes_seq[i_seq], shift_x=sx, shift_y=sy)
             
             if (self.infer_object):
 
@@ -1362,8 +1440,10 @@ class Deconvolution(object):
                 # Filter in Fourier
                 obj_filter_ft = self.fft_filter(obj_ft)                
 
-            else:                
-                obj_ft, obj_filter_ft, obj_filter = self.compute_object(frames_ft, otf, sigma_seq, plane_seq, pars_s0=self.pars_s0_seq[i_seq] if self.loss_type == 'marginal' else None)  
+            else:
+                pars_s0_arg = self.pars_s0_seq[i_seq] if self.loss_type == 'marginal' else None
+                pars_s2_arg = self.pars_s2_seq[i_seq] if (self.loss_type == 'marginal' and 'psd' in self.config) else None
+                obj_ft, obj_filter_ft, obj_filter = self.compute_object(frames_ft, otf, sigma_seq, plane_seq, pars_s0=pars_s0_arg, pars_s2=pars_s2_arg)  
                                    
 
             obj_filter_diffraction = [None] * self.n_o
@@ -1376,14 +1456,13 @@ class Deconvolution(object):
                 degraded[i] = torch.fft.ifft2(degraded_ft).real
                         
             for i in range(self.n_o):
-                psf[i] = psf[i].detach()
-                degraded[i] = degraded[i].detach()
+                psf[i] = psf[i].detach().cpu()
+                degraded[i] = degraded[i].detach().cpu()
                 obj_filter[i] = obj_filter[i].detach()
                 obj_filter_diffraction[i] = obj_filter_diffraction[i].detach()
 
-# There is a memory leak here!!!!!!!!!!!!!
-            # self.psf_seq[i_seq] = psf
-            # self.degraded_seq[i_seq] = degraded
+            self.psf_seq[i_seq] = psf
+            self.degraded_seq[i_seq] = degraded
             self.obj_seq[i_seq] = obj_filter
             self.obj_diffraction_seq[i_seq] = obj_filter_diffraction
 
@@ -1494,6 +1573,11 @@ class Deconvolution(object):
         # Combine all frames        
         self.frames_apodized, self.diversity, self.init_frame_diversity, self.sigma, self.plane = self.combine_frames()
 
+        # Precompute the FFT of the frames to speed up the optimization
+        self.frames_ft = [None] * self.n_o
+        for i in range(self.n_o):
+            self.frames_ft[i] = torch.fft.fft2(self.frames_apodized[i], norm=self.fft_norm)
+
         # Define all basis
         self._define_basis()
         
@@ -1531,7 +1615,7 @@ class Deconvolution(object):
             modes = np.cumsum(np.arange(2, self.noll_max+1))
 
         if self.psf_model.lower() == 'nmf':
-            n = (self.n_modes - 2) // 5
+            n = max(2, (self.n_modes - 2) // 5)
             modes = np.linspace(2, self.n_modes, n).astype(int)
         
         self.anneal = self.compute_annealing(modes, n_iterations)
@@ -1544,14 +1628,22 @@ class Deconvolution(object):
 
         # Initial values for the 
         if self.loss_type == 'marginal':
-            self.K_prior = self.config['psd']['K']
-            self.v0_prior = self.config['psd']['v0']
-            self.p_prior = self.config['psd']['p']
-
-            self.logger.info(f"PSD initial values :")
-            self.logger.info(f"  - K: {self.K_prior}")
-            self.logger.info(f"  - v0: {self.v0_prior}") 
-            self.logger.info(f"  - p: {self.p_prior}")
+            if 'psd' in self.config:
+                self.K_prior = [self.config['psd']['K'], 1.0]
+                self.v0_prior = [self.config['psd']['v0'], 1.0]
+                self.p_prior = [self.config['psd']['p'], 2.0]
+                self.logger.info(f"PSD initial values :")
+                self.logger.info(f"  - K: {self.K_prior[0]}")
+                self.logger.info(f"  - v0: {self.v0_prior[0]}") 
+                self.logger.info(f"  - p: {self.p_prior[0]}")
+            else:
+                self.K_prior = [self.config['priors']['K']['mean'], self.config['priors']['K']['sigma']]
+                self.v0_prior = [self.config['priors']['v0']['mean'], self.config['priors']['v0']['sigma']]
+                self.p_prior = [self.config['priors']['p']['mean'], self.config['priors']['p']['sigma']]
+                self.logger.info(f"Normal hyperpriors parameters :")
+                self.logger.info(f"  - K: mean = {self.K_prior[0]}, sigma = {self.K_prior[1]}")
+                self.logger.info(f"  - v0: mean = {self.v0_prior[0]}, sigma = {self.v0_prior[1]}") 
+                self.logger.info(f"  - p: mean = {self.p_prior[0]}, sigma = {self.p_prior[1]}")
 
         #--------------------------------
         # Start optimization
@@ -1569,7 +1661,9 @@ class Deconvolution(object):
         
         self.modes_seq = [None] * n_sequences
         self.pars_s0_seq = [None] * n_sequences
+        self.pars_s2_seq = [None] * n_sequences
         self.jitter_seq = [None] * n_sequences
+        self.shift_seq = [None] * n_sequences
         self.loss = [None] * n_sequences
 
         self.psf_seq = [None] * n_sequences        
@@ -1607,7 +1701,7 @@ class Deconvolution(object):
             for i in range(self.n_o):
                 frames_apodized_seq.append(self.frames_apodized[i][seq, ...].to(self.device))
                 plane_seq.append(self.plane[i][seq, ...].to(self.device))
-                frames_ft.append(torch.fft.fft2(self.frames_apodized[i][seq, ...], norm=self.fft_norm).to(self.device))
+                frames_ft.append(self.frames_ft[i][seq, ...].to(self.device))
                 sigma_seq.append(self.sigma[i][seq, ...].to(self.device))
                 diversity_seq.append(self.diversity[i][seq, ...].to(self.device))
 
@@ -1654,14 +1748,97 @@ class Deconvolution(object):
                         modes = modes.clone().detach().to(self.device).requires_grad_(True)
                 
                 if self.psf_model.lower() == 'nmf':                               
-                    tmp, _ = optim.nnls(self.basis[0].reshape((self.n_modes, self.npix**2)).T.cpu().numpy(), self.psf_diffraction[0].flatten().cpu().numpy())
-                    modes = torch.tensor(tmp[None, None, :].astype('float32')).expand((n_seq, self.n_f, self.n_modes))
-                    modes = modes.clone().detach().to(self.device).requires_grad_(True)
+                    init_mode = self.config.get('initialization', {}).get('modes', 'diffraction')
+                    if init_mode == 'cross_spectrum_nnls':
+                        self.logger.info("Initializing NMF modes using Cross-Spectrum NNLS...")
+                        
+                        # Use precomputed uncentered diffraction OTF as baseline reference
+                        otf_ref = self.psf_diffraction_ft[0]
+                        
+                        # Initialize target arrays for the coefficients (shape: n_seq, n_f, n_modes)
+                        basis_flat = self.basis[0].reshape((self.n_modes, self.npix**2)) # (n_modes, npix**2)
+                        
+                        # Collect all target PSFs into a single tensor
+                        target_psfs = torch.zeros((n_seq, self.n_f, self.npix, self.npix), device=self.device)
+                        
+                        # Process per sequence batch and frame to get target PSFs
+                        for i_s in range(n_seq):
+                            frames_seq = frames_apodized_seq[0][i_s]  # (n_f, npix, npix)
+                            frames_ft_seq = torch.fft.fft2(frames_seq, norm=self.fft_norm)  # (n_f, npix, npix)
+                            mean_frame_ft = torch.mean(frames_ft_seq, dim=0)  # (npix, npix)
+                            
+                            # Stabilized division denominator
+                            den = torch.conj(mean_frame_ft) * mean_frame_ft
+                            mean_den = torch.mean(den).real
+                            epsilon = 1e-4 * mean_den + 1e-12
+                            
+                            for i_f in range(self.n_f):
+                                # Ratio of frame OTF to mean frame OTF
+                                ratio = (frames_ft_seq[i_f] * torch.conj(mean_frame_ft)) / (den + epsilon)
+                                target_otf = ratio * otf_ref
+                                target_psf = torch.fft.ifft2(target_otf, norm=self.fft_norm).real
+                                target_psfs[i_s, i_f, :, :] = torch.fft.fftshift(target_psf, dim=[-2, -1])
+                        
+                        # Flatten targets to shape (n_seq * n_f, npix**2)
+                        Y = target_psfs.reshape((n_seq * self.n_f, self.npix**2))
+                        
+                        # Precompute quadratic terms for batched NNLS
+                        # H = A * A^T (n_modes, n_modes)
+                        H = torch.matmul(basis_flat, basis_flat.t())
+                        # G = Y * A^T (n_seq * n_f, n_modes)
+                        G = torch.matmul(Y, basis_flat.t())
+                        
+                        # Compute Lipschitz constant (largest eigenvalue of H) for optimal step size
+                        L = torch.linalg.eigvalsh(H)[-1].item()
+                        step = 1.0 / L
+                        
+                        # Batched Accelerated Projected Gradient (APG) for NNLS
+                        X = torch.zeros((n_seq * self.n_f, self.n_modes), device=self.device)
+                        Y_apg = X.clone()
+                        t_apg = 1.0
+                        for _ in range(80):
+                            # Gradient step & non-negative projection
+                            X_next = torch.clamp(Y_apg - step * (torch.matmul(Y_apg, H) - G), min=0.0)
+                            t_next = 0.5 * (1.0 + np.sqrt(1.0 + 4.0 * t_apg**2))
+                            Y_apg = X_next + ((t_apg - 1.0) / t_next) * (X_next - X)
+                            X = X_next
+                            t_apg = t_next
+                            
+                        tmp_torch = X.reshape((n_seq, self.n_f, self.n_modes))
+                    else:
+                        # Centering the diffraction PSF to match the NMF basis spatial layout
+                        self.logger.info("Initializing NMF modes using Diffraction PSF NNLS fit...")
+                        psf_diff_centered = torch.fft.fftshift(self.psf_diffraction[0], dim=[-2, -1])
+                        tmp, _ = optim.nnls(self.basis[0].reshape((self.n_modes, self.npix**2)).T.cpu().numpy(), psf_diff_centered.flatten().cpu().numpy())
+                        tmp_torch = torch.tensor(tmp.astype('float32'))[None, None, :].repeat((n_seq, self.n_f, 1))
                     
+                    # Convert physical NNLS coefficients to optimization variables
+                    # account for softplus_scale: x = inv_softplus(tmp * scale) / scale
+                    scale = self.config['optimization'].get('softplus_scale', 1.0)
+                    
+                    # Safe inverse softplus: for large values x ~= y, for small values use the log formula
+                    threshold = 20.0
+                    modes_val = torch.where(tmp_torch * scale > threshold, 
+                                          tmp_torch, 
+                                          torch.log(torch.exp(tmp_torch * scale) - 1.0 + 1e-10) / scale)
+                    
+                    modes = modes_val.clone().detach().to(self.device).requires_grad_(True)
+                    
+                    # Initialize learnable PSF shift (one per sequence, in pixels) if enabled in config
+                    if self.config['psf']['shift']:
+                        self.shift_x = torch.zeros((n_seq, self.n_f), device=self.device, requires_grad=True)
+                        self.shift_y = torch.zeros((n_seq, self.n_f), device=self.device, requires_grad=True)
+                    
+            if self.psf_model.lower() == 'nmf' and self.config['psf']['shift']:
+                self.logger.info(f"NMF: adding learnable PSF shift (shift_x, shift_y) to optimizer...")
+
             if (infer_object):
                 self.logger.info(f"Optimizing object and modes...")
 
                 parameters = [{'params': modes, 'lr': self.lr_modes}]
+                if self.psf_model.lower() == 'nmf' and self.config['psf']['shift']:
+                    parameters.append({'params': self.shift_x, 'lr': self.lr_modes})
+                    parameters.append({'params': self.shift_y, 'lr': self.lr_modes})
                 obj = [None] * self.n_o
 
                 for i in range(self.n_o):
@@ -1672,28 +1849,46 @@ class Deconvolution(object):
                 self.logger.info(f"Optimizing modes only...")
 
                 parameters = [{'params': modes, 'lr': self.lr_modes}]
+                if self.psf_model.lower() == 'nmf' and self.config['psf']['shift']:
+                    parameters.append({'params': self.shift_x, 'lr': self.lr_modes})
+                    parameters.append({'params': self.shift_y, 'lr': self.lr_modes})
 
                 if self.loss_type == 'marginal':
-                    # S0(v) = k / (1 + (v/v0)^2)**(p/2)
-                    # log k, log v0, p
+                    if 'psd' in self.config:
+                        # Upstream format: pars_s0 shape (n_o, 3), pars_s2 shape (n_o, 1)
+                        pars_s0 = np.zeros((self.n_o, 3))
+                        for i in range(self.n_o):
+                            pars_s0[i, 0] = np.log(self.K_prior[0] / self.npix)
+                            pars_s0[i, 1] = np.log(self.v0_prior[0])
+                            pars_s0[i, 2] = np.log(self.p_prior[0])
+                        self.pars_s0_out = np.zeros((self.n_o, 3))
+                        pars_s0_torch = torch.tensor(pars_s0.astype('float32')).to(self.device).requires_grad_(True)
+                        self.pars_s0_out = torch.tensor(self.pars_s0_out.astype('float32')).to(self.device)
+                        if self.lr_prior > 0:
+                            parameters.append({'params': pars_s0_torch, 'lr': self.lr_prior})
 
-                    # Initialize the parameters of the power spectral density of the object with some reasonable values
-                    pars_s0 = np.zeros((self.n_o, 3))
-
-                    # We initialize sigma2 with the average of the noise variance across frames
-                    for i in range(self.n_o):
-                        pars_s0[i, 0] = np.log(self.K_prior / self.npix)
-                        pars_s0[i, 1] = np.log(self.v0_prior) # log v0
-                        pars_s0[i, 2] = np.log(self.p_prior) #                        
-                    self.pars_s0_out = np.zeros((self.n_o, 3))
-                    pars_s0_torch = torch.tensor(pars_s0.astype('float32')).to(self.device).requires_grad_(True)
-                    self.pars_s0_out = torch.tensor(self.pars_s0_out.astype('float32')).to(self.device)
-                    parameters.append({'params': pars_s0_torch, 'lr': self.lr_prior})
-
-
-                    pars_s2 = np.zeros((self.n_o, 1))
-
-                    # We initialize sigma2 with the average of the noise variance across frames
+                        pars_s2 = np.zeros((self.n_o, 1))
+                        for i in range(self.n_o):                        
+                            pars_s2[i, 0] = np.log(sigma_seq[i].mean().item()**2)
+                        self.pars_s2_out = np.zeros((self.n_o, 1))
+                        pars_s2_torch = torch.tensor(pars_s2.astype('float32')).to(self.device).requires_grad_(True)
+                        self.pars_s2_out = torch.tensor(self.pars_s2_out.astype('float32')).to(self.device)
+                        if self.lr_prior > 0:
+                            parameters.append({'params': pars_s2_torch, 'lr': self.lr_prior})
+                    else:
+                        # Local format fallback: pars_s0 shape (n_seq, n_o, 4)
+                        pars_s0 = np.zeros((n_seq, self.n_o, 4))
+                        for i in range(self.n_o):
+                            pars_s0[:, i, 0] = np.log(self.K_prior[0])
+                            pars_s0[:, i, 1] = np.log(self.v0_prior[0])
+                            pars_s0[:, i, 2] = self.p_prior[0]
+                            pars_s0[:, i, 3] = np.log(sigma_seq[i].mean().item()**2)
+                        self.pars_s0_out = np.zeros((n_seq, self.n_o, 4))
+                        pars_s0_torch = torch.tensor(pars_s0.astype('float32')).to(self.device).requires_grad_(True)
+                        self.pars_s0_out = torch.tensor(self.pars_s0_out.astype('float32')).to(self.device)
+                        pars_s2_torch = None
+                        if self.lr_prior > 0:
+                            parameters.append({'params': pars_s0_torch, 'lr': self.lr_prior})
                     for i in range(self.n_o):                        
                         pars_s2[i, 0] = np.log(sigma_seq[i].mean().item()**2)
                     self.pars_s2_out = np.zeros((self.n_o, 1))
@@ -1709,7 +1904,8 @@ class Deconvolution(object):
                     jitter[:, :, 2] = 0.01
 
                     jitter_torch = torch.tensor(jitter.astype('float32')).to(self.device).requires_grad_(True)
-                    parameters.append({'params': jitter_torch, 'lr': self.lr_modes})
+                    if self.lr_modes > 0:
+                        parameters.append({'params': jitter_torch, 'lr': self.lr_modes})
 
                 # Slow jitter, parameterized in terms of a Bezier curve with 3 ccontrol points
                 # The first one is always at (0, 0)
@@ -1723,7 +1919,15 @@ class Deconvolution(object):
             # Second order optimizer
             if optimizer == 'lbfgs':
                 self.logger.info(f"Using LBFGS optimizer...")
-                opt = torch.optim.LBFGS(parameters, lr=0.01)
+                # LBFGS does not support parameter groups (different LRs for different params)
+                # We flatten the parameters into a single list
+                params_lbfgs = []
+                for group in parameters:
+                    if isinstance(group, dict):
+                        params_lbfgs.append(group['params'])
+                    else:
+                        params_lbfgs.append(group)
+                opt = torch.optim.LBFGS(params_lbfgs, lr=self.lr_modes, line_search_fn='strong_wolfe')
             if optimizer == 'adam':
                 self.logger.info(f"Using Adam optimizer...")
                 opt = torch.optim.Adam(parameters)
@@ -1813,20 +2017,23 @@ class Deconvolution(object):
 
                     else:                        
 
+                        pars_s0_arg = pars_s0_torch if self.loss_type == 'marginal' else None
+                        pars_s2_arg = pars_s2_torch if (self.loss_type == 'marginal' and 'psd' in self.config) else None
+
                         if self.show_object_info:
                             obj_ft, obj_filter_ft, obj_filter = self.compute_object(frames_ft, 
                                                                                     otf, 
                                                                                     sigma_seq, 
                                                                                     plane_seq, 
-                                                                                    pars_s0=pars_s0_torch if self.loss_type == 'marginal' else None,
-                                                                                    pars_s2=pars_s2_torch if self.loss_type == 'marginal' else None)
+                                                                                    pars_s0=pars_s0_arg, 
+                                                                                    pars_s2=pars_s2_arg)
 
                         # Compute the loss function using the appropriate filter for the loss
                         loss_data, loss_prior, loss = self.compute_loss(frames_ft, 
                                                                         otf, 
                                                                         sigma_seq, 
-                                                                        pars_s0=pars_s0_torch if self.loss_type == 'marginal' else None, 
-                                                                        pars_s2=pars_s2_torch if self.loss_type == 'marginal' else None,
+                                                                        pars_s0=pars_s0_arg, 
+                                                                        pars_s2=pars_s2_arg,
                                                                         jitter=jitter_torch if self.use_jitter != 'none' else None)
 
                     # If MOMFBD is used, then the object cannot be regularized. Look for alternatives for the future
@@ -1897,16 +2104,12 @@ class Deconvolution(object):
                     tmp['contrast'] = f'{torch.std(obj_filter[0]) / torch.mean(obj_filter[0]) * 100.0:7.4f}'
                     tmp['minmax'] = f'{torch.min(obj_filter[0]):7.4f}/{torch.max(obj_filter[0]):7.4f}'
                 tmp['chg'] = f'{delta_modes.item():8.6f}'
-                if self.loss_type == 'marginal':
-                    tmp['lr'] = f'{opt.param_groups[0]["lr"]:8.6f}/{opt.param_groups[1]["lr"]:8.6f}'
-                else:
-                    tmp['lr'] = f'{opt.param_groups[0]["lr"]:8.6f}'
-                tmp['LDATA'] = f'{loss_data.detach().item():8.6f}'
-                tmp['LPRIOR'] = f'{loss_prior.detach().item():8.6f}'
-                if self.loss_type == 'marginal':
+                if self.loss_type == 'marginal' and len(opt.param_groups) > 1:
                     tmp['lr'] = f'{opt.param_groups[0]["lr"]:6.3f}/{opt.param_groups[1]["lr"]:6.3f}'
                 else:
                     tmp['lr'] = f'{opt.param_groups[0]["lr"]:6.3f}'
+                tmp['LDATA'] = f'{loss_data.detach().item():8.6f}'
+                tmp['LPRIOR'] = f'{loss_prior.detach().item():8.6f}'
                 if self.loss_type == 'marginal':
                     tmp['K'] = f'{self.pars_s0_out[0][0].item() * self.npix:6.2f}'
                     tmp['v0'] = f'{self.pars_s0_out[0][1].item():6.2f}'
@@ -1923,11 +2126,10 @@ class Deconvolution(object):
                 t.set_postfix(ordered_dict=tmp)
                 
                 n_active = self.anneal[loop]
-
                 if self.loss_type == 'marginal':
                     if n_active > self.stop_psd:
-                        opt.param_groups[1]['lr'] = 0.0
-                    # opt.param_groups[2]['lr'] = 0.0
+                        if len(opt.param_groups) > 1:
+                            opt.param_groups[1]['lr'] = 0.0
 
                 
             self.tf_convergence = time.time()
@@ -1953,7 +2155,8 @@ class Deconvolution(object):
                 for i in range(self.n_o):
                     # Compute filtered object from the current estimate while also clamping negative values
                     if (self.config['optimization']['transform'] == 'softplus'):
-                        tmp = torch.clamp(F.softplus(obj[i]), min=0.0)
+                        scale = self.config['optimization'].get('softplus_scale', 1.0)
+                        tmp = torch.clamp(F.softplus(obj[i] * scale) / scale, min=0.0)
                         obj_ft[i] = torch.fft.fft2(tmp, norm=self.fft_norm)
                     else:
                         tmp = torch.clamp(obj[i], min=0.0)
@@ -1966,12 +2169,9 @@ class Deconvolution(object):
                     obj_filter[i] = torch.fft.ifft2(obj_filter_ft[i]).real
 
             else:
-                obj_ft, obj_filter_ft, obj_filter = self.compute_object(frames_ft, 
-                                                                        otf, 
-                                                                        sigma_seq, 
-                                                                        plane_seq, 
-                                                                        pars_s0=pars_s0_torch if self.loss_type == 'marginal' else None,
-                                                                        pars_s2=pars_s2_torch if self.loss_type == 'marginal' else None)
+                pars_s0_arg = pars_s0_torch if self.loss_type == 'marginal' else None
+                pars_s2_arg = pars_s2_torch if (self.loss_type == 'marginal' and 'psd' in self.config) else None
+                obj_ft, obj_filter_ft, obj_filter = self.compute_object(frames_ft, otf, sigma_seq, plane_seq, pars_s0=pars_s0_arg, pars_s2=pars_s2_arg)
                                    
 
             obj_filter_diffraction = [None] * self.n_o
@@ -1986,18 +2186,20 @@ class Deconvolution(object):
             # Store the results for the current set of sequences
             self.modes_seq[i_seq] = modes.detach()
             self.jitter_seq[i_seq] = jitter_torch.detach() if self.use_jitter != 'none' else None
+            if self.psf_model.lower() == 'nmf' and self.config['psf']['shift']:
+                self.shift_seq[i_seq] = (self.shift_x.detach(), self.shift_y.detach())
             self.pars_s0_seq[i_seq] = self.pars_s0_out if not infer_object and self.loss_type == 'marginal' else None
+            self.pars_s2_seq[i_seq] = self.pars_s2_out if not infer_object and self.loss_type == 'marginal' and 'psd' in self.config else None
             self.loss[i_seq] = losses.detach()
 
             for i in range(self.n_o):
-                psf[i] = psf[i].detach()
-                degraded[i] = degraded[i].detach()
+                psf[i] = psf[i].detach().cpu()
+                degraded[i] = degraded[i].detach().cpu()
                 obj_filter[i] = obj_filter[i].detach()
                 obj_filter_diffraction[i] = obj_filter_diffraction[i].detach()
 
-# There is a memory leak here!!!!!!!!!!!!!
-            # self.psf_seq[i_seq] = psf
-            # self.degraded_seq[i_seq] = degraded
+            self.psf_seq[i_seq] = psf
+            self.degraded_seq[i_seq] = degraded
             self.obj_seq[i_seq] = obj_filter
             self.obj_diffraction_seq[i_seq] = obj_filter_diffraction
 
@@ -2036,11 +2238,22 @@ class Deconvolution(object):
             self.obj_diffraction[i] = torch.cat(tmp, dim=0)
             
             if self.loss_type == 'marginal':
-                tmp = [self.pars_s0_seq[j][i, :] for j in range(n_sequences)]
-                if len(tmp) > 0:
-                    self.pars_s0[i] = torch.cat(tmp, dim=0)
+                if 'psd' in self.config:
+                    tmp_s0 = [self.pars_s0_seq[j][i, :] for j in range(n_sequences)]
+                    tmp_s2 = [self.pars_s2_seq[j][i, :] for j in range(n_sequences)]
+                    if len(tmp_s0) > 0:
+                        self.pars_s0[i] = torch.stack(tmp_s0, dim=0)
+                        # We can also store pars_s2 as an attribute if needed
+                        self.pars_s2 = [None] * self.n_o
+                        self.pars_s2[i] = torch.stack(tmp_s2, dim=0)
+                    else:
+                        self.pars_s0[i] = None
                 else:
-                    self.pars_s0[i] = None
+                    tmp = [self.pars_s0_seq[j][:, i, :] for j in range(n_sequences)]
+                    if len(tmp) > 0:
+                        self.pars_s0[i] = torch.cat(tmp, dim=0)
+                    else:
+                        self.pars_s0[i] = None
                     
         return 
     

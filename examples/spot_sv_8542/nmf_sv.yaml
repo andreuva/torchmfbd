@@ -7,6 +7,7 @@ images:
     wavelength : 8542.0
     pix_size : 0.059
     apodization_border : 6
+    remove_gradient_apodization : True
 
 object1:
     wavelength : 8542.0
@@ -25,6 +26,8 @@ optimization:
     lr_obj : 0.02
     lr_modes : 0.08
     lr_tt : 0.003
+    lr_prior : 0.1
+    loss_type: marginal
 
 regularization:
     smooth1:
@@ -41,7 +44,7 @@ regularization:
 psf:
     model : nmf        
     nmax_modes : 150
-    filename: 'basis/nmf_8542_n_150_r0_5_30.npz'
+    filename: '../basis/nmf_8542_n_150_r0_5_30.npz'
     ngrid_modes: 8
 
 initialization:
@@ -49,6 +52,18 @@ initialization:
     modes_std : 0.0
 
 annealing:
-    type: none
+    type: linear
     start_pct : 0.0
     end_pct : 0.85
+
+
+priors:
+    K:
+        mean: 1.0
+        sigma: 1.0
+    v0:
+        mean: 0.1
+        sigma: 1.0
+    p:
+        mean: 2.0
+        sigma: 2.0

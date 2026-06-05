@@ -47,6 +47,6 @@ if __name__ == '__main__':
 
     fig, ax = pl.subplots(nrows=2, ncols=2, figsize=(10, 10))
     for i in range(2):
-        ax[0, i].imshow(frames[0, i, 0, :, :])
-        ax[1, i].imshow(obj[i][0, :, :])
-    pl.savefig('nmf.png')    
+        ax[0, i].imshow(frames[0, i, 0, :, :], cmap='viridis', interpolation='nearest')
+        ax[1, i].imshow(obj[i][0, :, :], cmap='viridis', interpolation='nearest')
+    pl.savefig('nmf_sv.png', dpi=300, bbox_inches='tight')
