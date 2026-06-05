@@ -944,7 +944,7 @@ class Deconvolution(object):
 
                 # Evaluate the s_u function on the frequency grid.
                 # We use the mean of the frames in Fourier space to set the scale of s_u at frequency 0,0
-                s_u = K * self.npix / (1.0 + (v/v0)**2)**(4.0/2.0)
+                s_u = K * self.npix / (1.0 + (v/v0)**2)**(p/2.0)
                 
                 # The DC component of the Fourier transform of the image is equal to sqrt(nx*ny)*mean if norm='ortho'
                 # As a consequence, the variance of the noise at frequency (0,0) is given by s_u[0,0] = mean**2 * nx * ny
