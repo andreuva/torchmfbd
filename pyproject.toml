@@ -42,6 +42,11 @@ dependencies = [
     "h5py>=3.13.0",
 ]
 
+[project.optional-dependencies]
+	dev = [
+		"pytest",
+]
+
 # https://docs.astral.sh/uv/guides/integration/pytorch/#using-a-pytorch-index
 
 [tool.uv.sources]
