@@ -24,6 +24,7 @@ import torchmfbd.configuration as configuration
 import time
 import scipy.optimize as optim
 from astropy.io import fits
+from einops import rearrange
 try:
     import ncg_optimizer
     NGC_OPTIMIZER = True
@@ -973,6 +974,72 @@ class Deconvolution(object):
                 s2 = torch.mean(sigma[obj]**2)
         
         return s_u, s2, K, v0, p
+    
+    def solve_object_time_evolution(self, S, D, Reg_Space, lambda_s, lambda_t):
+        """
+        Optimized batched Thomas solver taking advantage of constant symmetric off-diagonals (a = c = -lambda_t).
+        
+        Parameters:
+        -----------
+        S : torch.Tensor (complex)
+            Shape (M, J, Nx, Ny). The OTFs for M bursts, each containing J frames.
+        D : torch.Tensor (complex)
+            Shape (M, J, Nx, Ny). The Fourier transformed data frames.
+        Reg_Space : torch.Tensor (real)
+            Shape (Nx, Ny). Precomputed spatial regularization grid |R_s(u, v)|^2.
+        lambda_s : float
+            Spatial regularization parameter.
+        lambda_t : float
+            Temporal regularization parameter.
+        device : str
+            The target computation device ('cuda' or 'cpu').
+        
+        """
+        
+        M, J, Nx, Ny = S.shape
+        B = Nx * Ny
+        
+        # 1. Compute Data Components and RHS Vector
+        sum_S_sq_flat = torch.sum(torch.abs(S)**2, dim=1).reshape(M, B)
+        RHS = torch.sum(torch.conj(S) * D, dim=1).reshape(M, B)
+        reg_s_flat = (lambda_s * Reg_Space).flatten()
+        
+        # 2. Vectorized Construction of the Main Diagonal (No Loops)
+        # Broadcast spatial regularizer across all M bursts
+        d = sum_S_sq_flat + reg_s_flat
+        
+        # Apply temporal constraints natively via broadcasting and slicing
+        d += 2.0 * lambda_t
+        d[0, :] -= lambda_t
+        d[M - 1, :] -= lambda_t
+
+        # 3. Streamlined Forward Pass
+        c_prime = torch.zeros((M - 1, B), dtype=torch.complex128, device=S.device)
+        d_prime = torch.zeros((M, B), dtype=torch.complex128, device=S.device)
+        
+        # Row 0 Initialization
+        d_prime[0, :] = d[0, :]
+        c_prime[0, :] = -lambda_t / d_prime[0, :]
+        d_prime[0, :] = RHS[0, :] / d_prime[0, :]
+        
+        # Rows 1 to M-2
+        for m in range(1, M - 1):
+            denom = d[m, :] + lambda_t * c_prime[m - 1, :]
+            c_prime[m, :] = -lambda_t / denom
+            d_prime[m, :] = (RHS[m, :] + lambda_t * d_prime[m - 1, :]) / denom
+            
+        # Row M-1 (Last row)
+        denom = d[M - 1, :] + lambda_t * c_prime[M - 2, :]
+        d_prime[M - 1, :] = (RHS[M - 1, :] + lambda_t * d_prime[M - 2, :]) / denom
+
+        # 4. Backward Substitution Pass
+        O_flat = torch.zeros((M, B), dtype=torch.complex128, device=S.device)
+        O_flat[M - 1, :] = d_prime[M - 1, :]
+        
+        for m in range(M - 2, -1, -1):
+            O_flat[m, :] = d_prime[m, :] - c_prime[m, :] * O_flat[m + 1, :]
+            
+        return O_flat.reshape(M, Nx, Ny)
 
     def compute_object(self, images_ft, otf, sigma, plane, type_filter='tophat', pars_s0=None, pars_s2=None):
         """
@@ -1001,7 +1068,7 @@ class Deconvolution(object):
             gamma = s2_local[:, None, None, None] / (sigma[i][:, :, None, None] ** 2 + 1e-10)
             Sconj_S = torch.sum(gamma * torch.conj(otf[i]) * otf[i], dim=1)
             Sconj_I = torch.sum(gamma * torch.conj(otf[i]) * images_ft[i], dim=1)
-
+            
             frames_mean = torch.mean(images_ft[i][:, :, 0, 0], dim=1).real
 
             s_u, s2, K, v0, p = self.get_su_s2(obj=i, sigma=sigma, pars_s0=pars_s0, pars_s2=pars_s2, frames_mean=frames_mean)
@@ -1015,7 +1082,17 @@ class Deconvolution(object):
             # Use Lofdahl & Scharmer (1994) filter
             if (self.image_filter[i] == 'scharmer'):
                 mask = self.lofdahl_scharmer_filter(Sconj_S, Sconj_I, s2_filt.detach()) * self.mask_diffraction_th[i][None, :, :]
-                out_ft[i] = Sconj_I / (Sconj_S + 1e-10)
+                
+                if self.time_present:
+                    # Reg_Space = torch.ones_like(Sconj_S[0, ...]).to(self.device)
+                    # out_ft[i] = self.solve_object_time_evolution(otf[i], images_ft[i], Reg_Space, 0.0, 1.0)
+                    # breakpoint()
+                    out_ft[i] = Sconj_I / (Sconj_S + 1e-10)
+
+                else:
+                    out_ft[i] = Sconj_I / (Sconj_S + 1e-10)
+
+                                    
                             
                 out_filter_ft[i] = out_ft[i] * mask
             
@@ -1234,13 +1311,22 @@ class Deconvolution(object):
         """
         
         self.logger.info(f"Adding frames for object {id_object} - diversity {id_diversity} - defocus {diversity}")
-
+                
         if sigma is None:
             self.logger.info(f"Estimating noise...")
+
+            # If time is included, flatten the frames for sequences and time
+            if frames.ndim == 5:                
+                self.time_present = True
+                self.n_seq, self.n_t, self.n_f, self.nx, self.ny = frames.shape
+                frames = frames.reshape((-1, self.n_f, self.nx, self.ny))
+            else:
+                self.time_present = False
+                self.n_seq, self.n_f, self.nx, self.ny = frames.shape
+                self.n_t = 1
+
             sigma = noise.compute_noise(frames).to(self.device)
-            self.logger.info(f"   * Average noise: {torch.mean(sigma)}")
-            # sigma = 1.0 / sigma**2            
-            # sigma = torch.tensor(sigma.astype('float32')).to(self.device)
+            self.logger.info(f"   * Average noise: {torch.mean(sigma)}")            
 
         self.ind_object.append(id_object)        
         self.ind_diversity.append(id_diversity)
@@ -1386,13 +1472,22 @@ class Deconvolution(object):
 
         n_seq, _, _, _ = self.frames_apodized[0].shape
 
-        # Split sequences in batches
+        # If time is present, we flatten the sequence and time dimensions to have a single sequence dimension
+        # but compute the indices of the new flattened sequences to be able to recover the original shape of 
+        # the object at the end of the optimization        
+        n_seq = self.n_seq * self.n_t
         ind = np.arange(n_seq)
-
         n_seq_total = n_seq
+                        
+        ind = self.split_and_merge(n_seq, self.n_t, self.simultaneous_sequences)
 
-        # Split the sequences in groups of simultaneous sequences to be computed in parallel
-        ind = np.array_split(ind, np.ceil(n_seq / self.simultaneous_sequences))
+        # # Split sequences in batches
+        # ind = np.arange(n_seq)
+
+        # n_seq_total = n_seq
+
+        # # Split the sequences in groups of simultaneous sequences to be computed in parallel
+        # ind = np.array_split(ind, np.ceil(n_seq / self.simultaneous_sequences))
 
         n_sequences = len(ind)
         
@@ -1488,9 +1583,13 @@ class Deconvolution(object):
 
             tmp = [self.obj_seq[j][i] for j in range(n_sequences)]
             self.obj[i] = torch.cat(tmp, dim=0)
+            if self.time_present:
+                self.obj[i] = rearrange(self.obj[i], '(s t) h w -> s t h w', t=self.n_t, s=self.n_seq)
 
             tmp = [self.obj_diffraction_seq[j][i] for j in range(n_sequences)]
             self.obj_diffraction[i] = torch.cat(tmp, dim=0)
+            if self.time_present:
+                self.obj_diffraction[i] = rearrange(self.obj_diffraction[i], '(s t) h w -> s t h w', t=self.n_t, s=self.n_seq)
         
         return 
     
@@ -1521,14 +1620,41 @@ class Deconvolution(object):
         hdu.writeto(filename, overwrite=True)
 
         return
+
+    def split_and_merge(self, M, N, K):
+        """
+        Split a sequence of length M into chunks of size N, ensuring that the last chunk does not exceed K.
+        Parameters:
+        -----------
+        M : int
+            The length of the sequence to be split.
+        N : int
+            The size of each chunk.
+        K : int
+            The maximum allowed size for the last chunk.
+        Returns:
+        --------
+        list of lists
+            A list containing the split chunks of the sequence.
+        """
+        if N > K:
+            raise ValueError("N cannot be greater than K")
+            
+        sequence = list(range(M))
+        # Calculate the largest multiple of N that is <= K
+        step_size = (K // N) * N
+        
+        # Directly slice the main sequence
+        return [sequence[i:i + step_size] for i in range(0, len(sequence), step_size)]
             
     def deconvolve(self,                                    
-                   simultaneous_sequences=1, 
-                   infer_object=False, 
-                   optimizer='adam', 
-                   obj_in=None, 
-                   modes_in=None,                    
-                   n_iterations=20):
+                   simultaneous_sequences=1,
+                   infer_object=False,
+                   optimizer='adam',
+                   obj_in=None,
+                   modes_in=None,
+                   n_iterations=20,
+                   sequence_length=None):
         
 
         """
@@ -1536,7 +1662,7 @@ class Deconvolution(object):
         Parameters:
         -----------
         frames : torch.Tensor
-            The input frames to be deconvolved (n_sequences, n_objects, n_frames, nx, ny).
+            List with the input frames to be deconvolved (n_batch, n_sequences, n_frames, nx, ny) for each object.
         sigma : torch.Tensor
             The noise standard deviation for each object.
         simultaneous_sequences : int, optional
@@ -1570,9 +1696,11 @@ class Deconvolution(object):
         self.logger.info(f" *** SPATIALLY INVARIANT DECONVOLUTION ***")
         self.logger.info(f" *****************************************")
 
+        
+
         # Combine all frames        
         self.frames_apodized, self.diversity, self.init_frame_diversity, self.sigma, self.plane = self.combine_frames()
-
+        
         # Precompute the FFT of the frames to speed up the optimization
         self.frames_ft = [None] * self.n_o
         for i in range(self.n_o):
@@ -1586,23 +1714,25 @@ class Deconvolution(object):
         #     self.frames_apodized[i] = self.frames_apodized[i].to(self.device)
         #     self.diversity[i] = self.diversity[i].to(self.device)
         #     self.sigma[i] = self.sigma[i].to(self.device)
-            
+                    
         self.logger.info(f"Frames")        
         for i in range(self.n_o):
-            n_seq, n_f, n_x, n_y = self.frames_apodized[i].shape
-            self.logger.info(f"  * Object {i}")
-            self.logger.info(f"     - Number of sequences {n_seq}...")
-            self.logger.info(f"     - Number of frames {n_f}...")
+            
+            self.logger.info(f"  * Object {i}")            
+            self.logger.info(f"     - Number of sequences {self.n_seq}...")
+            if self.time_present:
+                self.logger.info(f"     - Number of times {self.n_t}...")
+            self.logger.info(f"     - Number of frames {self.n_f}...")
             self.logger.info(f"     - Number of diversity channels {len(self.init_frame_diversity[i])}...")
             for j, ind in enumerate(self.init_frame_diversity[i]):
                 self.logger.info(f"       -> Diversity {j} = {self.diversity[i][0, ind]} - Noise = {self.sigma[i][0, ind]}...")
-            self.logger.info(f"     - Size of frames {n_x} x {n_y}...")
+            self.logger.info(f"     - Size of frames {self.n_x} x {self.n_y}...")
             self.logger.info(f"     - Filter: {self.image_filter[i]} - cutoff: {self.cutoff[i]}...")
             if self.loss_type == "joint":
                 self.logger.info(f"     - s_u: {self.s_u[i]}")
             if self.loss_type == "marginal":                
                 self.logger.info(f"     - Stopping optimization after {self.stop_psd} modes")
-                
+                                
         self.finite_difference = util.FiniteDifference().to(self.device)
         self.set_regularizations()
                                                     
@@ -1649,14 +1779,15 @@ class Deconvolution(object):
         # Start optimization
         #--------------------------------
 
-        # Split sequences in batches
+        # If time is present, we flatten the sequence and time dimensions to have a single sequence dimension
+        # but compute the indices of the new flattened sequences to be able to recover the original shape of 
+        # the object at the end of the optimization        
+        n_seq = self.n_seq * self.n_t
         ind = np.arange(n_seq)
-
         n_seq_total = n_seq
-
-        # Split the sequences in groups of simultaneous sequences to be computed in parallel
-        ind = np.array_split(ind, np.ceil(n_seq / simultaneous_sequences))
-
+                        
+        ind = self.split_and_merge(n_seq, self.n_t, simultaneous_sequences)
+        
         n_sequences = len(ind)
         
         self.modes_seq = [None] * n_sequences
@@ -1666,7 +1797,7 @@ class Deconvolution(object):
         self.shift_seq = [None] * n_sequences
         self.loss = [None] * n_sequences
 
-        self.psf_seq = [None] * n_sequences        
+        self.psf_seq = [None] * n_sequences
         self.degraded_seq = [None] * n_sequences
         self.obj_seq = [None] * n_sequences
         self.obj_diffraction_seq = [None] * n_sequences
@@ -1724,10 +1855,10 @@ class Deconvolution(object):
                     else:                    
                         if self.config['initialization']['object'] == 'contrast':
                             self.logger.info(f"Selecting initial object as image with best contrast...")
-                            obj_init[i] = frames_apodized_seq[i][:, ind[0], :, :]
+                            obj_init[i] = frames_apodized_seq[i][:, :, ind[0], :, :]
                         if self.config['initialization']['object'] == 'average':
                             self.logger.info(f"Selecting initial object as average image...")
-                            obj_init[i] = torch.mean(frames_apodized_seq, dim=1)
+                            obj_init[i] = torch.mean(frames_apodized_seq[i], dim=2)
                     
                         # Initialize the object with the inverse softplus
                     if (self.config['optimization']['transform'] == 'softplus'):
@@ -1976,17 +2107,17 @@ class Deconvolution(object):
                 
                         # Compute PSF from current wavefront coefficients and reference 
                         modes_centered = modes.clone()
-                        modes_centered[:, :, 0:2] = modes_centered[:, :, 0:2] - modes[:, 0:1, 0:2]
+                        modes_centered[:, : , 0:2] = modes_centered[:, :, 0:2] - modes[:, 0:1, 0:2]
 
                         if self.remove_tt:
                             modes_centered[:, :, 0:2] = 0.0
                                     
                         # modes -> (n_seq, n_f, self.n_modes)
                         # jitter > (n_seq, n_f, 3)                                                
-                        psf, otf = self.compute_psfs(modes_centered[:, :, 0:n_active], diversity_seq, jitter=jitter_torch if self.use_jitter != 'none' else None)
+                        psf, otf = self.compute_psfs(modes_centered[..., 0:n_active], diversity_seq, jitter=jitter_torch if self.use_jitter != 'none' else None)
                     
                     if self.psf_model.lower() == 'nmf':
-                        psf, otf = self.compute_psfs_nmf(modes[:, :, 0:n_active])
+                        psf, otf = self.compute_psfs_nmf(modes[..., 0:n_active])
                     
                     if (infer_object):
 
@@ -2230,12 +2361,18 @@ class Deconvolution(object):
 
             # tmp = [self.degraded_seq[j][i] for j in range(n_sequences)]
             # self.degraded[i] = torch.cat(tmp, dim=0)
-
-            tmp = [self.obj_seq[j][i] for j in range(n_sequences)]
+            
+            tmp = [self.obj_seq[j][i] for j in range(n_sequences)]            
             self.obj[i] = torch.cat(tmp, dim=0)
+
+            # Put back time dimension if it was present in the input data
+            if self.time_present:
+                self.obj[i] = rearrange(self.obj[i], '(s t) h w -> s t h w', t=self.n_t, s=self.n_seq)
 
             tmp = [self.obj_diffraction_seq[j][i] for j in range(n_sequences)]
             self.obj_diffraction[i] = torch.cat(tmp, dim=0)
+            if self.time_present:
+                self.obj_diffraction[i] = rearrange(self.obj_diffraction[i], '(s t) h w -> s t h w', t=self.n_t, s=self.n_seq)
             
             if self.loss_type == 'marginal':
                 if 'psd' in self.config:

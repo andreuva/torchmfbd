@@ -80,8 +80,8 @@ if __name__ == '__main__':
     obj = []    
     best_frame = []
     for i in range(2):
-        obj.append(patchify.unpatchify(decSI.obj[i], apodization=6, weight_type='cosine', weight_params=30).cpu().numpy())        
-        best_frame.append(patchify.unpatchify(frames_patches[i][:, ind_best_contrast, :, :], apodization=6, weight_type='cosine', weight_params=30).cpu().numpy())
+        obj.append(patchify.unpatchify(decSI.obj[i][:, None, ...], apodization=6, weight_type='cosine', weight_params=30).cpu().numpy())        
+        best_frame.append(patchify.unpatchify(frames_patches[i][:, ind_best_contrast:ind_best_contrast+1, :, :], apodization=6, weight_type='cosine', weight_params=30).cpu().numpy())
 
     npix = obj[0][0, :, :].shape[0]
     

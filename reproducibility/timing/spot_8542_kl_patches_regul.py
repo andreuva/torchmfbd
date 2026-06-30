@@ -99,7 +99,7 @@ if __name__ == '__main__':
     # degraded = patchify.unpatchify(decSI.degraded, apodization=6).cpu().numpy()
     obj = []
     for i in range(2):
-        obj.append(patchify.unpatchify(decSI.obj[i], apodization=6).cpu().numpy())        
+        obj.append(patchify.unpatchify(decSI.obj[i][:, None, ...], apodization=6).cpu().numpy())        
     # obj_diffraction = patchify.unpatchify(decSI.obj_diffraction, apodization=6).cpu().numpy()    
     # frames = patchify.unpatchify(frames_patches).cpu().numpy()
 

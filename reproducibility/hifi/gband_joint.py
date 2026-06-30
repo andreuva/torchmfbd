@@ -41,7 +41,7 @@ if __name__ == '__main__':
                      n_iterations=250)
             
     # Unpatchify
-    obj = patchify.unpatchify(decSI.obj[0], apodization=6, weight_type='cosine', weight_params=30).cpu().numpy()
+    obj = patchify.unpatchify(decSI.obj[0][:, None, ...], apodization=6, weight_type='cosine', weight_params=30).cpu().numpy()
 
     f = fits.open('../obs/gband_bluec/hifiplus1_20230721_085151_sd_speckle.fts')
     speckle = f[0].data

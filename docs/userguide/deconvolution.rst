@@ -100,7 +100,7 @@ The deconvolution can be carried out by the following code:
     obj = []
     frames_back = []
     for i in range(2):
-        obj.append(patchify.unpatchify(deconv.obj[i], apodization=6).cpu().numpy())
+        obj.append(patchify.unpatchify(deconv.obj[i][:, None, ...], apodization=6).cpu().numpy())
         frames_back.append(patchify.unpatchify(frames_patches[i], apodization=0).cpu().numpy())
 
     npix = obj[0][0, :, :].shape[0]

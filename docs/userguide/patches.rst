@@ -33,6 +33,16 @@ generates a tensor of shape ``(196, 12, 64, 64)``. The patches can be unpatchifi
     frames_back = patchify.unpatchify(patches, apodization=0, weight_type='gaussian', weight_param=1.0)
 
 where an apodization can be applied to each patch, often used to remove border effects during the deconvolution.
+Note that the reconstruction of the patches needs to have the same number of dimensions as the original frames, otherwise 
+an error will be raised. If you want to reconstruct the frames with a different number of dimensions, remember
+to add a singleton dimension to the patches before unpatchifying, for example:
+
+::
+
+    frames_back = patchify.unpatchify(patches[:, None, ...], apodization=0, weight_type='gaussian', weight_param=1.0)
+
+which is useful if, for instance, the patches have shape ``(n_patches, n_x_patch, n_y_patch)``, which is typical
+when merging back reconstructed data.
 
 The ``patchify`` function has the following options:
 

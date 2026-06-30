@@ -80,9 +80,9 @@ if __name__ == '__main__':
         
     best_frame = []
     obj = []
-    for i in range(2):
-        obj.append(patchify.unpatchify(decSI.obj[i], apodization=6, weight_type='cosine', weight_params=30).cpu().numpy())        
-        best_frame.append(patchify.unpatchify(frames_patches[i][:, ind_best_contrast, :, :], apodization=6, weight_type='cosine', weight_params=30).cpu().numpy())
+    for i in range(2):        
+        obj.append(patchify.unpatchify(decSI.obj[i][:, None, ...], apodization=6, weight_type='cosine', weight_params=30).cpu().numpy())        
+        best_frame.append(patchify.unpatchify(frames_patches[i][:, ind_best_contrast:ind_best_contrast+1, :, :], apodization=6, weight_type='cosine', weight_params=30).cpu().numpy())
     
     mfbd = [None] * 2
     mfbd[0] = fits.open('../aux/camXX_2020-07-27T08:35:09_00000_8542_8542_+65_lc0.fits')[0].data[None, :, ::-1]

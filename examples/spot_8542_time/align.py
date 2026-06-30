@@ -1,0 +1,112 @@
+import numpy as np
+import os
+import h5py
+import torch
+import matplotlib.pyplot as pl
+from matplotlib import animation
+import sys
+sys.path.append('../')
+from readsst import readsst
+import torchmfbd
+from astropy.io import fits
+from einops import rearrange
+
+if __name__ == '__main__':
+
+    lam = 6
+    npix = 256
+    xy0 = [150, 150]
+
+    obs_file = 'sequence_8542_npix256_aligned.h5'
+    
+    root = '/net/diablos/scratch/sesteban/reduc/reduc_andres/spot_20200727_083509_8542'
+    label = '20200727_083509_8542_nwav_al'
+    print(f'Reading wavelength point {lam}...')
+    for i in range(8):
+        wb_tmp, nb_tmp = readsst(root, 
+                            label, 
+                            cam=0, 
+                            lam=lam, 
+                            mod=0, 
+                            seq=[i, i+1],
+                            xrange=[xy0[0], xy0[0]+npix], 
+                            yrange=[xy0[1], xy0[1]+npix], 
+                            destretch=False,
+                            instrument='CRISP')
+        
+        if i == 0:
+            wb = wb_tmp
+            nb = nb_tmp
+        if i > 0:
+            wb = np.concatenate((wb, wb_tmp), axis=0)
+            nb = np.concatenate((nb, nb_tmp), axis=0)
+
+    ns, nf, nx, ny = wb.shape
+
+    wb = torch.tensor(wb, dtype=torch.float32).to('cuda')
+    nb = torch.tensor(nb, dtype=torch.float32).to('cuda')
+    
+    # Align the frames inside each sequence
+    warped, tt = torchmfbd.destretch(wb[:, None, :, :, :],
+                                     ngrid=16, 
+                                     lr=0.20,
+                                     reference_frame=0,                                     
+                                     border=6,
+                                     n_iterations=60,
+                                     lambda_tt=0.01)
+
+
+    # Now align all sequences
+    warped2 = rearrange(warped, 'ns no nf nx ny -> nf no ns nx ny')    
+    warped_seq, tt_seq = torchmfbd.destretch(warped2[0:1, ...],
+                                     ngrid=16, 
+                                     lr=0.20,
+                                     reference_frame=0,                                     
+                                     border=6,
+                                     n_iterations=60,
+                                     lambda_tt=0.01)
+    
+    # Add both tiptilts
+    tt_final = tt + tt_seq[0, :, None, ...]
+
+    # Apply it to the original frames
+    tt_final = rearrange(tt_final, 'nb nf d nx ny -> (nb nf) d nx ny')
+    wb_final = torchmfbd.apply_destretch(wb[:, None, :, :, :], tt_final).cpu().numpy()
+    nb_final = torchmfbd.apply_destretch(nb[:, None, :, :, :], tt_final).cpu().numpy()
+
+
+    # # ns, no, nf, nx, ny
+    im = np.concatenate([wb_final, nb_final], axis=1)
+    im_d = None
+
+    print(f"Saving observations to {obs_file}...")
+    f = h5py.File(obs_file, 'w')
+    f.create_dataset('im', data=im)
+    f.close()
+
+    # Save movie: use 3rd axis (nf) as frames and concatenate all sequence frames (ns)
+    movie_file = os.path.splitext(obs_file)[0] + '.mp4'
+    movie_cube = rearrange(im, 'ns no nf nx ny -> (ns nf) no nx ny')
+
+    # If multiple channels exist in axis=1, display them side-by-side
+    if movie_cube.shape[1] > 1:
+        movie_frames = np.concatenate([movie_cube[:, i, :, :] for i in range(movie_cube.shape[1])], axis=-1)
+    else:
+        movie_frames = movie_cube[:, 0, :, :]
+
+    fig, ax = pl.subplots(figsize=(8, 8))
+    vmin, vmax = np.percentile(movie_frames[0], [1, 99])
+    img = ax.imshow(movie_frames[0], cmap='gray', origin='lower', vmin=vmin, vmax=vmax)
+    ax.set_title('Aligned sequence movie')
+    ax.set_axis_off()
+
+    print(f"Saving movie to {movie_file}...")
+    writer = animation.FFMpegWriter(fps=20)
+    with writer.saving(fig, movie_file, dpi=150):
+        for k in range(movie_frames.shape[0]):
+            img.set_data(movie_frames[k])
+            ax.set_title(f'Aligned sequence movie - frame {k+1}/{movie_frames.shape[0]}')
+            writer.grab_frame()
+    pl.close(fig)
+
+    

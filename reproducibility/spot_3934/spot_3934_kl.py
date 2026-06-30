@@ -144,8 +144,8 @@ if __name__ == '__main__':
     best_frame = []        
     obj = []
     for i in range(2):
-        obj.append(patchify.unpatchify(decSI.obj[i], apodization=18, weight_type='cosine', weight_params=30).cpu().numpy())
-        best_frame.append(patchify.unpatchify(frames_patches[i][:, ind_best_contrast, :, :], apodization=6, weight_type='cosine', weight_params=30).cpu().numpy())
+        obj.append(patchify.unpatchify(decSI.obj[i][:, None, ...], apodization=18, weight_type='cosine', weight_params=30).cpu().numpy())
+        best_frame.append(patchify.unpatchify(frames_patches[i][:, ind_best_contrast:ind_best_contrast+1, :, :], apodization=6, weight_type='cosine', weight_params=30).cpu().numpy())
     
     mfbd = [None] * 2
     mfbd[0] = fits.open('../aux/camXXVIII_2020-07-27T08:35:09_00000_12.00ms_G10.00_3934_3934_+65.fits')[0].data[None, :, :]

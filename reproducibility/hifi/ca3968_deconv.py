@@ -30,7 +30,7 @@ if __name__ == '__main__':
                      n_iterations=200)
             
     # Unpatchify
-    obj = patchify.unpatchify(decSI.obj[0], apodization=8, weight_type='cosine', weight_params=30).cpu().numpy()
+    obj = patchify.unpatchify(decSI.obj[0][:, None, ...], apodization=8, weight_type='cosine', weight_params=30).cpu().numpy()
 
     f = fits.open('ca3968_tio/hifiplus3_20230721_094744_sd_ca_speckle.fts')
     speckle = f[0].data

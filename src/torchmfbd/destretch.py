@@ -151,6 +151,8 @@ def destretch(frames,
         warped = warp(im_orig, tt_out, mode=mode)
         warped = rearrange(warped, '(nb nf) no nx ny -> nb no nf nx ny', nb=n_seq)
 
+        tt_out = rearrange(tt_out, '(nb nf) d nx ny -> nb nf d nx ny', nb=n_seq)
+
     if ndim == 3:
         warped = warped[0, 0, ...]
 
