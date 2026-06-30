@@ -112,18 +112,24 @@ The deconvolution can be carried out by the following code:
 
     deconv.write('output.fits')
 
-We start from a set of frames of shape ``(n_sequences, n_objects, n_frames, n_pixel, n_pixel)``. The first dimension
+We start from a set of frames of shape ``(n_sequences, n_objects, n_frames, n_pixel, n_pixel)``
+or ``(n_sequences, n_times, n_objects, n_frames, n_pixel, n_pixel)`` . The first dimension
 define the sequence (for instance, wavelength position, modulation state, etc.) that you want to 
-deconvolve in parallel. The second defines the object (for instance, wide-band and narrow-band) that are assumed to 
-be affected by the same wavefront at each time. The third dimension defines the number of frames per sequence and object. 
+deconvolve in parallel. The second (if present) defines the time dimension, which is useful if you want to 
+deconvolve a time series of images. The third dimension defines the object (for instance, wide-band and narrow-band) that 
+are assumed to be affected by the same wavefront at each time. The fourth dimension defines the number of frames per sequence and object. 
 The last two dimensions define the size of the frames.
 
 
 We first instantiate the ``torchmfbd.Deconvolution`` class with the configuration file. We then patchify the frames and 
 add them to the deconvolution object. The ``add_frames`` method needs a tensor of shape ``(n_patches, n_frames, n_pixel, n_pixel)`` 
-and takes care of estimating the noise in the frames, which is needed for the deconvolution. All patches will be deconvolved in 
+or ``(n_patches, n_times, n_frames, n_pixel, n_pixel)``
+and takes care of estimating the noise in the frames, which is needed for the deconvolution. If ``n_times`` is present, 
+the deconvolution will be carried out for all times simultaneously, but it will be possible in the future to
+add regularization along the time dimension. All patches will be deconvolved in 
 parallel, so that the deconvolution is sped up. The number of patches to deconvolve simultaneously can be controlled 
-by the ``simultaneous_sequences`` argument of the ``deconvolve`` method.
+by the ``simultaneous_sequences`` argument of the ``deconvolve`` method. If you want to reconstruct all times
+together, remember to set ``simultaneous_sequences`` to the number of patches times the number of times. 
 
 In this example, the field of view is mosaicked into patches of size 64x64 with a stride (step) of 50 pixels, so 
 that they overlap. The frames are added object by object, indicating the index of the object ``id_object`` and the index of the
