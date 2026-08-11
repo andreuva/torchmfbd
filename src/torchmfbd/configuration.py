@@ -44,6 +44,9 @@ def _check_config(config):
 
     if "jitter" not in config["psf"]:
         config["psf"]["jitter"] = 'none'
+
+    if "enforce_positive_object" not in config["optimization"]:
+        config["optimization"]["enforce_positive_object"] = False
         
     if "shift" not in config["psf"]:
         config["psf"]["shift"] = False
@@ -60,7 +63,7 @@ def _check_config(config):
     if config["annealing"]["type"] not in ["sigmoid", "linear", "none"]:
         raise ValueError(f"Invalid value for annealing type. It is {config['annealing']['type']} but should be sigmoid, linear or none")
         
-    if config["psf"]["model"] not in ["zernike", "kl", "pca", "nmf"]:
+    if config["psf"]["model"] not in ["zernike", "kl", "pca", "nmf", "vae"]:
         raise ValueError(f"Invalid value for psf model. It is {config['psf']['model']} but should be zernike, kl, pca or nmf")
     
     for k, v in config.items():

@@ -1,6 +1,7 @@
 import numpy as np
 import torch
 import torch.nn.functional as F
+import torchmfbd
 from torchmfbd.warp import warp, warp_affine
 import torchmfbd.util as util
 from tqdm import tqdm
@@ -84,7 +85,10 @@ def destretch(frames,
         # Define the reference frame 'ir'
         if r == 0:
             # First pass: use the user-selected reference_frame
-            ir = current_frames[:, :, reference_frame:reference_frame + 1, :, :]
+            if reference_frame == 'avg':
+                ir, _ = torch.median(frames, dim=2, keepdim=True)
+            else:
+                ir = current_frames[:, :, reference_frame:reference_frame + 1, :, :]
         else:
             # Refinement passes: use the MEAN of all warped frames as the reference.
             # This is much more stable (higher SNR).
@@ -101,7 +105,7 @@ def destretch(frames,
 
             optimizer.zero_grad()
 
-            tt_iter = rearrange(tiptilt, 'nb nf d nx ny -> (nb nf) d nx ny')
+            tt_iter = rearrange(tiptilt, 'nb nf d nx ny -> (nb nf) d nx ny')            
             tt_iter = F.interpolate(tt_iter, size=(n_x, n_y), mode='bilinear')
             warped = warp(im_refine, tt_iter, mode='bilinear')
             warped = rearrange(warped, '(nb nf) no nx ny -> nb no nf nx ny', nb=n_seq)
@@ -180,7 +184,8 @@ def align(frames,
               mode='bilinear',
               padding_mode='reflection',
               no_shear=False,
-              no_rotation=False
+              no_rotation=False,
+              return_grid=False
               ):
     
     """
@@ -274,9 +279,13 @@ def align(frames,
         
         t.set_postfix(ordered_dict = tmp)
 
-    warped = warp_affine(im, affine, mode=mode, padding_mode=padding_mode)
-
-    return warped.detach(), affine.detach()
+    warped = warp_affine(im[None, ...], affine, mode=mode, padding_mode=padding_mode, return_grid=return_grid)[0, ...]
+        
+    if return_grid:        
+        warped, grid = warped
+        return warped.detach(), affine.detach(), grid.detach()
+    else:
+        return warped.detach(), affine.detach()
 
 
 def apply_align(frames, affine, mode='bicubic', padding_mode='reflection'):
@@ -284,3 +293,40 @@ def apply_align(frames, affine, mode='bicubic', padding_mode='reflection'):
     warped = warp_affine(frames, affine, mode=mode, padding_mode=padding_mode)
 
     return warped
+
+def align_sequence(frames, 
+                   lr=0.01,
+                   border=0,
+                   region=None,
+                   n_iterations=20,
+                   mode='bilinear',
+                   padding_mode='reflection',
+                   no_shear=False,
+                   no_rotation=False):
+    
+    frames_out = frames.clone()
+
+    avg = torch.mean(frames, dim=0, keepdim=True)
+
+    nframes = frames.shape[0]
+
+    frames_out[0, ...] = frames[0, ...]    
+
+    for i in tqdm(range(nframes)):
+
+        inp = torch.cat([avg, frames[i:i+1, :, :]], dim=0)
+
+        out, affine = torchmfbd.align(inp,
+                lr=lr,
+                border=border,
+                region=region,
+                n_iterations=n_iterations,              
+                mode=mode,
+                padding_mode=padding_mode,
+                no_shear=no_shear
+                )
+    
+        frames_out[i, ...] = out[0, :, :]
+
+    return frames_out
+        # affine_out[i, ...] = affine.cpu().numpy()

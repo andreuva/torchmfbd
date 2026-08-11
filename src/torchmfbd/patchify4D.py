@@ -86,6 +86,9 @@ class Patchify4D(object):
         xndim = x.ndim
         
         # 1. Determine incoming shape properties
+        if self.flatten_sequences and xndim == 3:
+            x = x[:, None, :, :]  # Add a channel dimension for single-frame input
+
         if self.flatten_sequences or xndim == 4:
             # Shape is ((prod(*) * L), current_frames, x, y)
             current_frames = x.shape[1]
@@ -445,6 +448,9 @@ if __name__ == '__main__':
     print(f'  - Reconstructed : {out.shape}')
 
     out = p.unpatchify(patches[:, 0:1, :, :], apodization=3)    
+    print(f'  - Reconstructed (single): {out.shape}')
+
+    out = p.unpatchify(patches[:, 0, :, :], apodization=3)    
     print(f'  - Reconstructed (single): {out.shape}')
 
 

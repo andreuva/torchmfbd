@@ -12,6 +12,11 @@ from astropy.io import fits
 
 if __name__ == '__main__':
 
+
+    regularize = True
+
+    pl.close('all')
+
     npix = 256
 
     obs_file = 'sequence_8542_npix256_aligned.h5'
@@ -21,7 +26,7 @@ if __name__ == '__main__':
     im_d = None
     f.close()
         
-    frames = im[0:2, :, :, 0:npix, 0:npix]
+    frames = im[0:49, :, :, 0:npix, 0:npix]
     
     frames /= np.mean(frames, axis=(-1, -2), keepdims=True)
 
@@ -34,27 +39,32 @@ if __name__ == '__main__':
             
     n_scans, n_obj, n_frames, nx, ny = frames.shape
     
-    decSI = torchmfbd.Deconvolution('spot_8542_joint.yaml')
+    if regularize:
+        decSI = torchmfbd.Deconvolution('spot_8542_joint_time.yaml')
+    else:
+        decSI = torchmfbd.Deconvolution('spot_8542_joint.yaml')
 
-    keep_time = False
+    keep_time = True
 
     if keep_time:
         flatten_sequences = False
+        n_t = frames.shape[0]
     else:
         flatten_sequences = True
+        n_t = 1
 
     # Patchify and add the frames
     frames_patches = [None] * 2
     for i in range(2):        
         frames_patches[i] = patchify.patchify(frames[:, i, :, :, :], patch_size=92, stride_size=40, flatten_sequences=flatten_sequences)                
         if keep_time:
-            decSI.add_frames(frames_patches[i].transpose(0, 1), id_object=i, id_diversity=0, diversity=0.0)
+            decSI.add_frames(frames_patches[i].transpose(0, 1), id_object=i, id_diversity=0, diversity=0.0, sigma=0.015)
         else:
-            decSI.add_frames(frames_patches[i], id_object=i, id_diversity=0, diversity=0.0)
+            decSI.add_frames(frames_patches[i], id_object=i, id_diversity=0, diversity=0.0, sigma=0.015)
         
     decSI.deconvolve(infer_object=False, 
                      optimizer='adam',                      
-                     simultaneous_sequences=8*3,
+                     simultaneous_sequences=49*5,
                      n_iterations=50)
         
     best_frame = []
@@ -63,18 +73,26 @@ if __name__ == '__main__':
         if keep_time:
             obj.append(patchify.unpatchify(decSI.obj[i].transpose(0, 1).unsqueeze(2), apodization=6, weight_type='cosine', weight_params=30).cpu().numpy())
             best_frame.append(patchify.unpatchify(frames_patches[i][:, :, ind_best_contrast:ind_best_contrast+1, :, :], apodization=6, weight_type='cosine', weight_params=30).cpu().numpy())
-        else:            
+        else:
             obj.append(patchify.unpatchify(decSI.obj[i][:,None,...], apodization=6, weight_type='cosine', weight_params=30).cpu().numpy())        
             best_frame.append(patchify.unpatchify(frames_patches[i][:, ind_best_contrast:ind_best_contrast+1, :, :], apodization=6, weight_type='cosine', weight_params=30).cpu().numpy())
     
 
-    fig, ax = pl.subplots(ncols=4, nrows=2, figsize=(16, 8), sharex=True, sharey=True)
+    # fig, ax = pl.subplots(ncols=4, nrows=n_t, figsize=(16, 4*n_t), sharex=True, sharey=True)
 
+    if regularize:
+        fout = h5py.File('reconstruction_regularized_contrast_3e-4.h5', 'w')
+    else:
+        fout = h5py.File('reconstruction_original.h5', 'w')
     for io in range(2):
-        for j in range(frames.shape[0]):
-            ax[io, 2*j].imshow(best_frame[io][j, 0, :, :], cmap='gray', vmin=0.5, vmax=1.5)
-            ax[io, 2*j+1].imshow(obj[io][j, 0, :, :], cmap='gray', vmin=0.5, vmax=1.5)    
-    pl.tight_layout()
+        # for j in range(n_t):
+            # ax[j, 2*io].imshow(best_frame[io][j, 0, :, :], cmap='gray', vmin=0.5, vmax=1.5)
+            # ax[j, 2*io+1].imshow(obj[io][j, 0, :, :], cmap='gray', vmin=0.5, vmax=1.5)    
+            # ax[j, 2*io].set_title(f't={j}, obj={io} best frame')
+            # ax[j, 2*io+1].set_title(f't={j}, obj={io} deconvolved')
+        
+        fout.create_dataset(f'obj_{io}', data=obj[io])
+        fout.create_dataset(f'best_frame_{io}', data=best_frame[io])
+    fout.close()
 
-    print("Updating the cutoffs for the deconvolution...")
-    decSI.update_object(cutoffs=[[0.3, 0.35], [0.3, 0.35]])
+    pl.tight_layout()    
