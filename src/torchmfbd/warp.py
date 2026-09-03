@@ -43,7 +43,7 @@ def warp(image, flow_AB, mode='bilinear'):
 
     return warped_image
 
-def warp_affine(image, affine, mode='bilinear', padding_mode='reflection'):
+def warp_affine(image, affine, mode='bilinear', padding_mode='reflection', return_grid=False):
     """
     Warps an image using the provided affine matrix.
 
@@ -61,5 +61,7 @@ def warp_affine(image, affine, mode='bilinear', padding_mode='reflection'):
                                                    mode=mode, 
                                                    padding_mode=padding_mode, 
                                                    align_corners=False)
-        
-    return warped_image
+    if return_grid:
+        return warped_image, tmp
+    else:
+        return warped_image

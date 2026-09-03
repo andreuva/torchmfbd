@@ -22,7 +22,7 @@ if __name__ == '__main__':
     root = '/net/diablos/scratch/sesteban/reduc/reduc_andres/spot_20200727_083509_8542'
     label = '20200727_083509_8542_nwav_al'
     print(f'Reading wavelength point {lam}...')
-    for i in range(8):
+    for i in range(49):
         wb_tmp, nb_tmp = readsst(root, 
                             label, 
                             cam=0, 
@@ -54,18 +54,26 @@ if __name__ == '__main__':
                                      border=6,
                                      n_iterations=60,
                                      lambda_tt=0.01)
-
-
+    
     # Now align all sequences
     warped2 = rearrange(warped, 'ns no nf nx ny -> nf no ns nx ny')    
+    # warped_seq = torchmfbd.align_sequence(warped2[0, 0, ...],
+    #                                  lr=0.005,
+    #                                  border=0,
+    #                                  region=None,
+    #                                  n_iterations=150,              
+    #                                  mode='bilinear',
+    #                                  padding_mode='zeros',
+    #                                  no_shear=True)
+
+    
     warped_seq, tt_seq = torchmfbd.destretch(warped2[0:1, ...],
-                                     ngrid=16, 
+                                     ngrid=1, 
                                      lr=0.20,
-                                     reference_frame=0,                                     
+                                     reference_frame='avg',                                     
                                      border=6,
                                      n_iterations=60,
                                      lambda_tt=0.01)
-    
     # Add both tiptilts
     tt_final = tt + tt_seq[0, :, None, ...]
 
@@ -106,6 +114,23 @@ if __name__ == '__main__':
         for k in range(movie_frames.shape[0]):
             img.set_data(movie_frames[k])
             ax.set_title(f'Aligned sequence movie - frame {k+1}/{movie_frames.shape[0]}')
+            writer.grab_frame()
+    pl.close(fig)
+
+    warped_seq = warped_seq[0, 0, ...].cpu().numpy()
+    movie_file = os.path.splitext(obs_file)[0] + '_align.mp4'
+    fig, ax = pl.subplots(figsize=(8, 8))
+    vmin, vmax = np.percentile(warped_seq[0, :, :], [1, 99])
+    img = ax.imshow(warped_seq[0, :, :], cmap='gray', origin='lower', vmin=vmin, vmax=vmax)
+    ax.set_title('Aligned sequence movie')
+    ax.set_axis_off()
+
+    print(f"Saving movie to {movie_file}...")
+    writer = animation.FFMpegWriter(fps=20)
+    with writer.saving(fig, movie_file, dpi=150):
+        for k in range(warped_seq.shape[0]):
+            img.set_data(warped_seq[k, :, :])
+            ax.set_title(f'Aligned sequence movie - frame {k+1}/{warped_seq.shape[0]}')
             writer.grab_frame()
     pl.close(fig)
 
