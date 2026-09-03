@@ -1312,19 +1312,18 @@ class Deconvolution(object):
         
         self.logger.info(f"Adding frames for object {id_object} - diversity {id_diversity} - defocus {diversity}")
                 
+        # If time is included, flatten the frames for sequences and time
+        if frames.ndim == 5:                
+            self.time_present = True
+            self.n_seq, self.n_t, self.n_f, self.nx, self.ny = frames.shape
+            frames = frames.reshape((-1, self.n_f, self.nx, self.ny))
+        else:
+            self.time_present = False
+            self.n_seq, self.n_f, self.nx, self.ny = frames.shape
+            self.n_t = 1
+
         if sigma is None:
             self.logger.info(f"Estimating noise...")
-
-            # If time is included, flatten the frames for sequences and time
-            if frames.ndim == 5:                
-                self.time_present = True
-                self.n_seq, self.n_t, self.n_f, self.nx, self.ny = frames.shape
-                frames = frames.reshape((-1, self.n_f, self.nx, self.ny))
-            else:
-                self.time_present = False
-                self.n_seq, self.n_f, self.nx, self.ny = frames.shape
-                self.n_t = 1
-
             sigma = noise.compute_noise(frames).to(self.device)
             self.logger.info(f"   * Average noise: {torch.mean(sigma)}")            
 
@@ -2027,6 +2026,7 @@ class Deconvolution(object):
                     self.pars_s2_out = torch.tensor(self.pars_s2_out.astype('float32')).to(self.device)
                     parameters.append({'params': pars_s2_torch, 'lr': self.lr_prior})
 
+                jitter_torch = None
                 # Fast jitter, faster than the integration time
                 if self.use_jitter == 'fast':
                     jitter = np.zeros((n_seq, self.n_f, 3))
@@ -2119,6 +2119,7 @@ class Deconvolution(object):
                     if self.psf_model.lower() == 'nmf':
                         psf, otf = self.compute_psfs_nmf(modes[..., 0:n_active])
                     
+                    obj_filter = None
                     if (infer_object):
 
                         obj_ft = [None] * self.n_o
@@ -2170,8 +2171,9 @@ class Deconvolution(object):
                     # If MOMFBD is used, then the object cannot be regularized. Look for alternatives for the future
                     # Object regularization
                     loss_obj = torch.tensor(0.0).to(self.device)
-                    for index in self.index_regularization['object']:
-                        loss_obj += self.regularization[index](obj_filter)
+                    if obj_filter is not None:
+                        for index in self.index_regularization['object']:
+                            loss_obj += self.regularization[index](obj_filter)
                     
                     # Total loss
                     loss += loss_obj
@@ -2316,7 +2318,7 @@ class Deconvolution(object):
             
             # Store the results for the current set of sequences
             self.modes_seq[i_seq] = modes.detach()
-            self.jitter_seq[i_seq] = jitter_torch.detach() if self.use_jitter != 'none' else None
+            self.jitter_seq[i_seq] = jitter_torch.detach() if (self.use_jitter != 'none' and jitter_torch is not None) else None
             if self.psf_model.lower() == 'nmf' and self.config['psf']['shift']:
                 self.shift_seq[i_seq] = (self.shift_x.detach(), self.shift_y.detach())
             self.pars_s0_seq[i_seq] = self.pars_s0_out if not infer_object and self.loss_type == 'marginal' else None
@@ -2353,7 +2355,7 @@ class Deconvolution(object):
         # for i in range(self.n_o):
         self.modes = torch.cat(self.modes_seq, dim=0)
         self.loss = torch.cat(self.loss, dim=0)
-        self.jitter = torch.cat(self.jitter_seq, dim=0) if self.use_jitter != 'none' else None
+        self.jitter = torch.cat(self.jitter_seq, dim=0) if (self.use_jitter != 'none' and self.jitter_seq[0] is not None) else None
                 
         for i in range(self.n_o):
             # tmp = [self.psf_seq[j][i] for j in range(n_sequences)]

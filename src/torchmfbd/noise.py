@@ -16,7 +16,7 @@ def compute_noise(frames):
     
     n_scans, n_frames, nx, ny = frames.shape
     
-    sigma = noise_estimation(frames.numpy())
+    sigma = noise_estimation(frames.cpu().numpy())
 
     sigma = torch.tensor(sigma.astype('float32')).to(frames.device)
     
