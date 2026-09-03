@@ -750,18 +750,12 @@ class Deconvolution(object):
             jitter_otf = torch.fft.fft2(jitter_psf)
 
         if self.use_jitter == 'fast' and n_active > 20:
-                
+
             sigma_x = torch.exp(jitter[:, :, 0])
             sigma_y = torch.exp(jitter[:, :, 1])
             rho_xy = torch.tanh(jitter[:, :, 2]) * sigma_x * sigma_y
-            
-            tx = self.f_x[i][None, None, :, :]**2 * sigma_x[:, :, None, None]**2 
-            ty = self.f_y[i][None, None, :, :]**2 * sigma_y[:, :, None, None]**2
-            txy = 2 * self.f_x[i][None, None, :, :] * self.f_y[i][None, None, :, :] * rho_xy[:, :, None, None]
 
-            jitter_otf = torch.exp(-2 * np.pi**2 * (tx + ty + txy))
-                    
-        for i in range(self.n_o):            
+        for i in range(self.n_o):
             # Compute wavefronts from estimated modes                
             wavefront = torch.einsum('ijk,klm->ijlm', modes, self.basis[i][0:n_active, :, :])
             
@@ -788,7 +782,11 @@ class Deconvolution(object):
 
             # If using jitter, multiply the OTFs
             if self.use_jitter == 'fast' and n_active > 20:
-                otf[i] *= jitter_otf
+                # f_x/f_y are defined per object, so the jitter OTF is built here
+                tx = self.f_x[i][None, None, :, :]**2 * sigma_x[:, :, None, None]**2
+                ty = self.f_y[i][None, None, :, :]**2 * sigma_y[:, :, None, None]**2
+                txy = 2 * self.f_x[i][None, None, :, :] * self.f_y[i][None, None, :, :] * rho_xy[:, :, None, None]
+                otf[i] = otf[i] * torch.exp(-2 * np.pi**2 * (tx + ty + txy))
 
             if self.use_jitter == 'slow' and n_active == self.n_modes:
                 otf[i] *= jitter_otf

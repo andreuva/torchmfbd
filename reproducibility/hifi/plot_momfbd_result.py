@@ -46,8 +46,12 @@ def plot_momfbd_results(fits_path, output_png=None, raw_fits_path=None,
     if raw_fits_path is not None:
         fig, axes = plt.subplots(2, 2, figsize=(14, 12))
         f_raw = fits.open(raw_fits_path)
-        raw_nb = f_raw[1].data[:nb_data.shape[0], :nb_data.shape[1]]
-        raw_wb = f_raw[2].data[:wb_data.shape[0], :wb_data.shape[1]]
+        # The mosaic starts at pixel (off, off) of the raw frame, because
+        # unpatchify crops that many pixels from every patch edge. Cropping the
+        # raw frame from (0, 0) instead would leave the two panels misaligned.
+        off = f[0].header.get('APODCROP', 6)
+        raw_nb = f_raw[1].data[off:off + nb_data.shape[0], off:off + nb_data.shape[1]]
+        raw_wb = f_raw[2].data[off:off + wb_data.shape[0], off:off + wb_data.shape[1]]
         f_raw.close()
 
         im0 = axes[0, 0].imshow(raw_wb, cmap='gray', origin='lower')

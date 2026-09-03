@@ -54,12 +54,16 @@ def measure_drift_and_brightness(result_files, upsample_factor=20, max_step_shif
         if prev_wb is not None:
             step_wb, _, _ = phase_cross_correlation(prev_wb, wb, upsample_factor=upsample_factor, normalization=None)
             step_nb, _, _ = phase_cross_correlation(prev_nb, nb, upsample_factor=upsample_factor, normalization=None)
-            if np.hypot(*step_wb) > max_step_shift:
-                step_wb = np.zeros(2)
-            if np.hypot(*step_nb) > max_step_shift:
-                step_nb = np.zeros(2)
-            cum_wb = cum_wb + step_wb
-            cum_nb = cum_nb + step_nb
+            # The two cameras look through the same telescope at the same
+            # instant, so the pointing jitter is common. Estimating and applying
+            # it separately would slowly de-register the two channels from each
+            # other, so the per-channel estimates are averaged and one common
+            # shift is applied to both. Estimates that fail the sanity clamp are
+            # dropped from the average rather than pulling it toward zero.
+            valid = [s for s in (step_wb, step_nb) if np.hypot(*s) <= max_step_shift]
+            step = np.mean(valid, axis=0) if valid else np.zeros(2)
+            cum_wb = cum_wb + step
+            cum_nb = cum_nb + step
 
         wb_shifts[path] = tuple(cum_wb)
         nb_shifts[path] = tuple(cum_nb)
